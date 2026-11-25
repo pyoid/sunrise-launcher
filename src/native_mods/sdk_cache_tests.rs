@@ -389,6 +389,18 @@ fn a_stamp_from_another_index_is_not_trusted() {
 }
 
 #[test]
+fn tool_identity_is_the_signed_index_digest_of_the_tool_assets() {
+    let tool = Asset::name(Kind::Tool, TRIPLE, Side::Client);
+    let identity = |bytes: &'static [u8]| {
+        let fixture = Fixture::new();
+        let sdk = fixture.sdk(&[(tool.as_str(), bytes)]).unwrap();
+        tool_identity(&sdk, TRIPLE).unwrap()
+    };
+    assert_eq!(identity(b"one"), sha256_hex(b"one"));
+    assert_ne!(identity(b"one"), identity(b"two"));
+}
+
+#[test]
 fn a_game_release_names_its_build_through_its_signed_index() {
     let fixture = Fixture::new();
     let base = fixture.scratch.path().join("base");
