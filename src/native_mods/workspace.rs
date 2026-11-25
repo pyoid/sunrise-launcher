@@ -1,5 +1,5 @@
 //! SDK inputs and writable paths for one native compiler attempt, never reused by a retry.
-use super::{sdk_cache::Package, tool, Path};
+use super::{links, sdk_cache::Package, tool, Path};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
