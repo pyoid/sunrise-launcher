@@ -153,26 +153,17 @@ fn the_mods_folder_path_is_stable_per_profile() {
     assert!(one.starts_with(workspace.path()));
 }
 
-#[test]
-fn writable_sdk_slices_do_not_share_the_cached_bytes() {
-    let dir = tempfile::tempdir().unwrap();
-    let stage = Workspace::scratch(dir.path(), "scratch");
-    let cached = Package::at(&dir.path().join("cache"));
-    fs::create_dir_all(&cached.runtime).unwrap();
-    fs::write(cached.runtime.join("input"), b"original").unwrap();
-    let private = stage.package(&cached).unwrap();
-    fs::write(private.runtime.join("input"), b"compiler scratch").unwrap();
-    assert_eq!(fs::read(cached.runtime.join("input")).unwrap(), b"original");
-}
-
-#[test]
-fn private_sdk_slices_keep_each_file_s_modified_time() {
-    let dir = tempfile::tempdir().unwrap();
-    let stage = Workspace::scratch(dir.path(), "scratch");
-    let cached = Package::at(&dir.path().join("cache"));
+/// A cached SDK with an `api` slice of two files, one in a folder, and a `runtime` slice of one.
+fn cached(dir: &Path) -> Package {
+    let cached = Package::at(&dir.join("cache"));
     fs::create_dir_all(cached.api.join("deps")).unwrap();
+    fs::create_dir_all(&cached.runtime).unwrap();
     let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
-    for file in [cached.api.join("top"), cached.api.join("deps/nested")] {
+    for file in [
+        cached.api.join("top"),
+        cached.api.join("deps/nested"),
+        cached.runtime.join("game"),
+    ] {
         fs::write(&file, b"slice").unwrap();
         fs::File::options()
             .write(true)
@@ -181,20 +172,128 @@ fn private_sdk_slices_keep_each_file_s_modified_time() {
             .set_modified(old)
             .unwrap();
     }
+    cached
+}
+
+#[test]
+fn the_package_is_linked_not_copied_and_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let stage = Workspace::scratch(dir.path(), "scratch");
+    let cached = cached(dir.path());
+    let laid = stage
+        .lay_out_package(&cached, Some("sdk"), &|_| {})
+        .unwrap();
+    let file = laid.api.join("deps/nested");
+    assert_eq!(fs::read(&file).unwrap(), b"slice");
+    assert!(fs::metadata(&file).unwrap().permissions().readonly());
+    assert!(!laid.engine.exists(), "a slice the SDK lacks stays absent");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            fs::metadata(&file).unwrap().ino(),
+            fs::metadata(cached.api.join("deps/nested")).unwrap().ino()
+        );
+    }
+}
+
+#[test]
+fn laid_out_files_keep_the_source_modified_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let stage = Workspace::scratch(dir.path(), "scratch");
+    let cached = cached(dir.path());
     // A read-only slice file keeps its time too.
     let top = cached.api.join("top");
     let mut readonly = fs::metadata(&top).unwrap().permissions();
     readonly.set_readonly(true);
     fs::set_permissions(&top, readonly).unwrap();
-    let private = stage.package(&cached).unwrap();
-    // The tool's build folder name hashes these times: the same every attempt.
-    for file in [private.api.join("top"), private.api.join("deps/nested")] {
+    let laid = stage
+        .lay_out_package(&cached, Some("sdk"), &|_| {})
+        .unwrap();
+    // The tool's build folder name hashes these times: the same every build.
+    let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    for file in [laid.api.join("top"), laid.api.join("deps/nested")] {
         assert_eq!(
             fs::metadata(&file).unwrap().modified().unwrap(),
             old,
             "{file:?}"
         );
     }
+}
+
+#[test]
+fn a_second_build_lays_nothing_out_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let stage = Workspace::scratch(dir.path(), "scratch");
+    let cached = cached(dir.path());
+    let said = std::cell::Cell::new(0);
+    let log = |_: &str| said.set(said.get() + 1);
+    let laid = stage.lay_out_package(&cached, Some("sdk"), &log).unwrap();
+    let stamp = stage.path().join("package.stamp");
+    let stamped = fs::metadata(&stamp).unwrap().modified().unwrap();
+    let again = stage.lay_out_package(&cached, Some("sdk"), &log).unwrap();
+    assert_eq!(again, laid);
+    assert_eq!(fs::metadata(&stamp).unwrap().modified().unwrap(), stamped);
+    assert_eq!(said.get(), 0);
+}
+
+#[test]
+fn a_changed_size_or_time_lays_the_package_out_again_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let stage = Workspace::scratch(dir.path(), "scratch");
+    let cached = cached(dir.path());
+    let heard = std::cell::RefCell::new(Vec::new());
+    let log = |line: &str| heard.borrow_mut().push(line.to_owned());
+    let laid = stage.lay_out_package(&cached, Some("sdk"), &log).unwrap();
+    // Replaced by another file, not written through the link into the cache.
+    let file = laid.api.join("top");
+    fs::remove_file(&file).unwrap();
+    fs::write(&file, b"tampered with, and longer").unwrap();
+    stage.lay_out_package(&cached, Some("sdk"), &log).unwrap();
+    assert_eq!(heard.borrow().len(), 1);
+    assert!(heard.borrow()[0].contains("laying them out again"));
+    assert_eq!(fs::read(&file).unwrap(), b"slice");
+}
+
+#[test]
+fn a_developers_own_sdk_is_laid_out_each_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let stage = Workspace::scratch(dir.path(), "scratch");
+    let cached = cached(dir.path());
+    let laid = stage
+        .lay_out_package(&cached, None, &|_| unreachable!())
+        .unwrap();
+    let marker = laid.api.join("marker");
+    fs::write(&marker, b"left by the first build").unwrap();
+    stage
+        .lay_out_package(&cached, None, &|_| unreachable!())
+        .unwrap();
+    assert!(!marker.exists());
+    assert!(!stage.path().join("package.stamp").exists());
+}
+
+#[test]
+fn a_hard_linked_package_file_is_not_taken_for_a_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let stage = Workspace::scratch(dir.path(), "scratch");
+    let cached = cached(dir.path());
+    let laid = stage
+        .lay_out_package(&cached, Some("sdk"), &|_| {})
+        .unwrap();
+    regular_under(stage.path(), &laid.runtime.join("game")).unwrap();
+}
+
+#[test]
+fn a_kept_folder_with_read_only_files_can_be_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let stage = Workspace::scratch(dir.path(), "scratch");
+    let cached = cached(dir.path());
+    stage
+        .lay_out_package(&cached, Some("sdk"), &|_| {})
+        .unwrap();
+    fs::remove_dir_all(stage.path()).unwrap();
+    assert!(!stage.path().exists());
+    assert_eq!(fs::read(cached.api.join("top")).unwrap(), b"slice");
 }
 
 #[test]

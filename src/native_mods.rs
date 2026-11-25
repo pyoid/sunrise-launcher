@@ -2005,7 +2005,11 @@ fn build_stages(
         for bundle in &mods {
             copy_bundle(bundle, &compiled.join(&bundle.manifest.id))?;
         }
-        let game = workspace.package(game).map_err(|e| e.to_string())?;
+        let game = workspace
+            .lay_out_package(game, signed_sdk.as_deref(), &|line| {
+                let _ = append_log(line);
+            })
+            .map_err(|e| e.to_string())?;
         let work = workspace.work();
         // A package carries the registry lock `cargo sunrise-mod build` wrote; a source folder may
         // have none yet. It gets the lock `native-lock` writes, from this build's tool and with
