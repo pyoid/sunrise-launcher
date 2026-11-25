@@ -248,12 +248,25 @@ fn routed_lifetime(stop: bool) {
                         .unwrap()
                         .parse()
                         .unwrap();
-                    let gone = unsafe { libc::kill(pid, 0) } != 0;
-                    #[cfg(target_os = "linux")]
-                    let gone = gone
-                        || fs::read_to_string(format!("/proc/{pid}/stat"))
-                            .is_ok_and(|stat| stat.rsplit_once(") ").unwrap().1.starts_with('Z'));
-                    assert!(gone, "Stop left the routed game running");
+                    // The kernel closes a dying process's files, its lease locks with them,
+                    // before the process becomes a zombie: the lease can be free a moment before
+                    // the game is gone. Wait for the exit itself, within the same deadline.
+                    let gone = || {
+                        #[cfg(target_os = "linux")]
+                        if fs::read_to_string(format!("/proc/{pid}/stat"))
+                            .is_ok_and(|stat| stat.rsplit_once(") ").unwrap().1.starts_with('Z'))
+                        {
+                            return true;
+                        }
+                        unsafe { libc::kill(pid, 0) != 0 }
+                    };
+                    while !gone() {
+                        assert!(
+                            std::time::Instant::now() < end,
+                            "Stop left the routed game running"
+                        );
+                        std::thread::yield_now();
+                    }
                 }
                 break;
             }

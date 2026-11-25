@@ -1,35 +1,101 @@
-//! SDK inputs and writable paths for one native compiler attempt, never reused by a retry.
-use super::{sdk_cache::Package, tool, Path};
+//! The kept build folder of one game build: SDK inputs and the writable paths of a native compile.
+use super::{
+    attempt_owner,
+    links::{self, link_or_copy, Placed},
+    sdk_cache::{listing, verify_slice, Package},
+    tool, Path,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
-    path::Component,
+    path::{Component, PathBuf},
 };
 use sunrise_launcher_smod::{
     index::{library_identity::LibraryIdentity, sha256, sha256_file},
     manifest::Manifest,
 };
 
-/// An attempt's folder: this prefix and 6 random characters. Short, because Windows' path limit
+/// A folder set aside: this prefix and 6 random characters. Short, because Windows' path limit
 /// counts every folder above the deepest file the SDK's build writes (#396).
 pub(crate) const ATTEMPT_PREFIX: &str = ".nb-";
 /// The folder launchers before 1.3.1 named attempts with, still found and counted on disk.
 pub(crate) const OLD_ATTEMPT_PREFIX: &str = ".native-attempt-";
-/// The SDK's work folder inside an attempt.
+/// The SDK's work folder inside the kept folder.
 const WORK: &str = "w";
+/// The kept folders, under the native folder; one per game build and what built it. `k\<8>` is
+/// as long as 1.3.4's attempt folder (`.nb-` and 6 characters), so every path below it is too.
+const KEPT: &str = "k";
+/// Written into the kept folder while a compiler's tree isn't proven gone.
+const WORKER: &str = ".worker";
+/// Changes when what a kept folder holds would no longer fit the launcher that wrote it.
+const KEY_VERSION: &str = "1";
+/// A kept folder's name: 5 characters of the game's revision, then 3 of the hash. Short, as the
+/// tool's build folder sits below it and Windows' path limit counts every character.
+const KEY_LENGTH: usize = 8;
 /// The deepest file a Windows build writes under the work folder, as #396 found it: rustc's
 /// import definition for a raw-dylib DLL, in Cargo's target folder under the SDK's build key.
 const DEEPEST: &str = r"prebuilt-build\94256510f74e-f618d2e4182eb19e\target\x86_64-pc-windows-gnu\release\deps\rustcgsxNAs\api-ms-win-core-backgroundtask-l1-1-0.dll_imports_indirect.def";
 /// Windows' `MAX_PATH`, its terminating NUL included, which mingw's `dlltool` doesn't get around.
 const MAX_PATH: usize = 260;
 
-/// How long the deepest path of a build in `attempt` would be, when it would pass Windows' limit.
-pub(super) fn too_deep(attempt: &Path) -> Option<usize> {
-    let length = attempt.as_os_str().len() + 1 + WORK.len() + 1 + DEEPEST.len();
+/// How long the deepest path of a build in `native`'s kept folder would be, when it would pass
+/// Windows' limit.
+pub(super) fn too_deep(native: &Path) -> Option<usize> {
+    let kept = native.as_os_str().len() + 1 + KEPT.len() + 1 + KEY_LENGTH;
+    let length = kept + 1 + WORK.len() + 1 + DEEPEST.len();
     (length >= MAX_PATH).then_some(length)
 }
 
-pub(super) struct Workspace(tempfile::TempDir);
+/// What decides whether two builds may share a kept folder.
+pub(super) struct KeyParts<'a> {
+    pub(super) revision: &'a str,
+    /// The signed index's digest, empty for a developer's own SDK.
+    pub(super) signed_sdk: &'a str,
+    pub(super) route: &'a str,
+    pub(super) target: &'a str,
+    pub(super) platform: &'a str,
+    pub(super) rust_target: &'a str,
+    pub(super) mixins_from_source: bool,
+}
+
+/// A kept folder's name. The tool's own key inside it (`kept_build`) carries the slice files and
+/// the tool's commit, so the tool is no part of this one.
+pub(super) fn key(parts: &KeyParts<'_>) -> String {
+    let hashed = [
+        KEY_VERSION,
+        parts.signed_sdk,
+        parts.route,
+        parts.target,
+        parts.platform,
+        parts.rust_target,
+        crate::rust_toolchain::VERSION,
+        if parts.mixins_from_source {
+            "source"
+        } else {
+            "release"
+        },
+    ]
+    .join("\0");
+    let revision = parts.revision.get(..5).unwrap_or(parts.revision);
+    format!("{revision}{}", &sha256(hashed.as_bytes())[..3])
+}
+
+/// The kept folder of one game build, held under its lock for as long as this lives.
+pub(super) struct Workspace {
+    dir: PathBuf,
+    _lock: crate::native_cache::Locked,
+    downloads: downloads::Downloads,
+}
+
+/// What [`Workspace::open`] found.
+#[derive(Debug, PartialEq)]
+pub(super) enum Opened {
+    Fresh,
+    Reused,
+    /// The last build here couldn't prove its workers stopped: its files are in this folder
+    /// and this build starts clean.
+    SetAside(PathBuf),
+}
 
 /// One SDK library, with the exact basename it is installed under and the verified
 /// bytes. A registry symlink alias is copied as a regular file under its original name.
@@ -38,12 +104,22 @@ pub(super) struct Library {
     pub(super) name: String,
     pub(super) source: std::path::PathBuf,
     pub(super) sha256: String,
+    /// The source is a file no build rewrites (the SDK package's runtime, the standard library,
+    /// the MinGW runtime), so an install links it instead of copying it.
+    pub(super) shared: bool,
 }
 
 impl Library {
     pub(super) fn copy_into(&self, destination: &Path) -> io::Result<()> {
         let output = destination.join(&self.name);
-        fs::copy(&self.source, &output)?;
+        if self.shared {
+            links::link_or_copy(&self.source, &output)?;
+        } else {
+            // Unlinked first: a carried file of this name may be a link into the base.
+            links::remove_file(&output)?;
+            crate::preparer::clone_or_copy(&self.source, &output)?;
+        }
+        // After a link this reads the source's own bytes, so it still proves them.
         if sha256_file(&output).is_ok_and(|digest| digest == self.sha256) {
             Ok(())
         } else {
@@ -53,22 +129,88 @@ impl Library {
 }
 
 impl Workspace {
-    pub(super) fn new(parent: &Path) -> io::Result<Self> {
-        let parent = crate::backend::plain(parent.canonicalize()?);
-        tempfile::Builder::new()
-            .prefix(ATTEMPT_PREFIX)
-            .rand_bytes(6)
-            .tempdir_in(parent)
-            .map(Self)
+    /// Opens the kept folder `key` under `native`, once any other build of it is done: this
+    /// calls `waiting` once when it has to wait. A folder whose last build never proved its
+    /// workers stopped is set aside and the build starts in an empty one.
+    pub(super) fn open(
+        native: &Path,
+        key: &str,
+        cancellation: &tool::Cancellation,
+        waiting: &dyn Fn(),
+    ) -> Result<(Self, Opened), String> {
+        let native = crate::backend::plain(native.canonicalize().map_err(|e| e.to_string())?);
+        // The lock sits outside the folder: an open handle inside it would block setting it aside.
+        let locks = native.join("build-locks");
+        fs::create_dir_all(&locks).map_err(|e| e.to_string())?;
+        let mut said = false;
+        let lock = loop {
+            let file = fs::File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(locks.join(format!("{key}.lock")))
+                .map_err(|e| e.to_string())?;
+            match crate::native_cache::locked(file, crate::native_cache::LockMode::Exclusive) {
+                Ok(lock) => break lock,
+                Err(crate::native_cache::Error::Busy) => {}
+                Err(error) => return Err(super::cache_error(error)),
+            }
+            cancellation.check()?;
+            if !std::mem::replace(&mut said, true) {
+                waiting();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        };
+        let dir = native.join(KEPT).join(key);
+        let opened = if dir.join(WORKER).exists() {
+            let aside = tempfile::Builder::new()
+                .prefix(ATTEMPT_PREFIX)
+                .rand_bytes(6)
+                .tempdir_in(&native)
+                .map_err(|e| e.to_string())?
+                .keep();
+            fs::remove_dir(&aside).map_err(|e| e.to_string())?;
+            fs::rename(&dir, &aside).map_err(|e| e.to_string())?;
+            // This process just failed to prove the tree gone: Storage must not delete it.
+            attempt_owner::claim(&aside).map_err(|e| e.to_string())?;
+            Opened::SetAside(aside)
+        } else if dir.exists() {
+            Opened::Reused
+        } else {
+            Opened::Fresh
+        };
+        match fs::remove_dir_all(dir.join("tmp")) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.to_string()),
+            _ => {}
+        }
+        fs::create_dir_all(dir.join("tmp")).map_err(|e| e.to_string())?;
+        crate::storage::mark_used(&dir).map_err(super::cache_error)?;
+        Ok((
+            Self {
+                dir,
+                _lock: lock,
+                downloads: downloads::Downloads::default(),
+            },
+            opened,
+        ))
     }
 
     pub(super) fn path(&self) -> &Path {
-        self.0.path()
+        &self.dir
     }
 
     /// The folder the SDK builds in.
-    pub(super) fn work(&self) -> std::path::PathBuf {
+    pub(super) fn work(&self) -> PathBuf {
         self.path().join(WORK)
+    }
+
+    /// Where a profile's mods are staged for the tool, the same path every build: the tool
+    /// names its own stage folder after it. `m\<10>` is as long as 1.3.4's `mods.compile`.
+    pub(super) fn mods(&self, profile: &Path) -> PathBuf {
+        self.path()
+            .join("m")
+            .join(&sha256(profile.as_os_str().as_encoded_bytes())[..10])
     }
 
     pub(super) fn isolate(&self, command: &mut std::process::Command) -> io::Result<()> {
@@ -83,38 +225,98 @@ impl Workspace {
             .env("TMPDIR", &tmp)
             .env("TMP", &tmp)
             .env("TEMP", &tmp);
+        if self.offline() {
+            // The fetch the tool runs before cargo then only resolves the lock locally.
+            command.env("CARGO_NET_OFFLINE", "true");
+        }
         Ok(())
     }
 
-    /// From here on an escaped descendant can outlive the launcher or SDK. It can keep its
-    /// private paths; ordinary retry and recovery must not unlink or reuse them.
-    pub(super) fn allow_worker(&mut self) {
-        self.0.disable_cleanup(true);
+    /// From here on an escaped descendant can outlive the launcher or SDK, and can keep writing
+    /// into this folder. The next build of it sets it aside unless a proof ([`Self::worker_finished`])
+    /// came first.
+    pub(super) fn allow_worker(&mut self) -> io::Result<()> {
+        fs::write(self.dir.join(WORKER), std::process::id().to_string())
     }
 
-    /// A terminal OS proof, not successful compilation by itself, permits cleanup.
-    pub(super) fn worker_finished(&mut self) {
-        self.0.disable_cleanup(false);
+    /// A terminal OS proof, not successful compilation by itself, lets the folder be reused.
+    pub(super) fn worker_finished(&mut self) -> io::Result<()> {
+        match fs::remove_file(self.dir.join(WORKER)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
     }
 
-    /// Copy the installed SDK inputs, never giving a compiler links into the shared cache.
-    pub(super) fn package(&self, package: &Package) -> io::Result<Package> {
-        let root = self.path().join("package");
-        fs::create_dir(&root)?;
+    /// A kept folder `key` under `parent`, as a test needs it, with nothing to wait for.
+    #[cfg(test)]
+    pub(super) fn scratch(parent: &Path, key: &str) -> Self {
+        let waiting = tool::Cancellation::default();
+        Self::open(parent, key, &waiting, &|| {})
+            .expect("a scratch folder opens")
+            .0
+    }
+
+    /// Lays the SDK's slices (`from`, kept in the shared cache) out in this folder, once: by hard
+    /// links where the file system allows, else copies, and read-only, so a build script can't
+    /// change a cached file by accident. Each later build only checks every file's size and
+    /// modified time against what was laid out, and lays the package out again, with a line to
+    /// `log`, when one differs. A developer's own SDK (no `signed_sdk`) is laid out each time.
+    pub(super) fn lay_out_package(
+        &self,
+        from: &Package,
+        signed_sdk: Option<&str>,
+        log: &dyn Fn(&str),
+    ) -> io::Result<Package> {
+        let root = self.dir.join("package");
         let private = Package::at(&root);
+        let stamp = self.dir.join("package.stamp");
+        let laid = fs::read(&stamp)
+            .ok()
+            .and_then(|text| serde_json::from_slice::<Laid>(&text).ok());
+        if let (Some(laid), Some(source)) = (&laid, signed_sdk) {
+            if laid.source == source {
+                if listing(&root).is_some_and(|now| now == laid.files) {
+                    return Ok(private);
+                }
+                log("The SDK files in this build folder changed: laying them out again");
+            }
+        }
+        // Never current while it is being laid out.
+        match fs::remove_file(&stamp) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+        match fs::remove_dir_all(&root) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+        fs::create_dir(&root)?;
         for (from, to) in [
-            (&package.runtime, &private.runtime),
-            (&package.api, &private.api),
-            (&package.engine, &private.engine),
+            (&from.runtime, &private.runtime),
+            (&from.api, &private.api),
+            (&from.engine, &private.engine),
         ] {
             match fs::symlink_metadata(from) {
                 Ok(meta) if meta.is_dir() && !crate::native_cache::linked(&meta) => {
-                    copy_slice(from, to)?;
+                    // The full check, against the sums the SDK cache recorded when it
+                    // unpacked what the signed index lists: before a link makes it the build's.
+                    verify_slice(from)?;
+                    place_slice(from, to)?;
                 }
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {}
                 Err(err) => return Err(err),
                 Ok(_) => return Err(invalid()),
             }
+        }
+        if let Some(source) = signed_sdk {
+            let laid = Laid {
+                source: source.to_owned(),
+                files: listing(&root).ok_or_else(invalid)?,
+            };
+            fs::write(
+                &stamp,
+                serde_json::to_vec(&laid).expect("a stamp serializes"),
+            )?;
         }
         Ok(private)
     }
@@ -252,6 +454,8 @@ impl Workspace {
                 || (!stamped
                     && built.route == tool::CheckRoute::Prebuilt
                     && file.starts_with(&joined_runtime));
+            // When true, the first branch below is the one taken.
+            let shared = dynamic && !produced && (runtime() || standard() || gnu());
             let source = if dynamic
                 && ((produced && regular_under(self.path(), &file).is_ok())
                     || runtime()
@@ -269,6 +473,7 @@ impl Workspace {
                 name: name.to_owned(),
                 source,
                 sha256,
+                shared,
             };
             if files.insert(name.to_ascii_lowercase(), library).is_some() {
                 return Err(invalid());
@@ -339,7 +544,17 @@ impl Workspace {
     }
 }
 
-fn copy_slice(from: &Path, to: &Path) -> io::Result<()> {
+/// What [`Workspace::lay_out_package`] laid out, and from which signed SDK.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Laid {
+    source: String,
+    files: BTreeMap<String, (u64, u64)>,
+}
+
+/// Places the files of the slice `from` at `to`, linked or copied, each read-only. The tool names
+/// its build folder from each slice file's path, length and modified time (`kept_build`): a
+/// link keeps the time, and a copy gets it set back, or no kept library would be found again.
+fn place_slice(from: &Path, to: &Path) -> io::Result<()> {
     fs::create_dir(to)?;
     for entry in fs::read_dir(from)? {
         let entry = entry?;
@@ -349,13 +564,14 @@ fn copy_slice(from: &Path, to: &Path) -> io::Result<()> {
         }
         let to = to.join(entry.file_name());
         if meta.is_dir() {
-            copy_slice(&entry.path(), &to)?;
+            place_slice(&entry.path(), &to)?;
         } else if meta.is_file() {
-            crate::preparer::clone_or_copy(&entry.path(), &to)?;
-            // The tool names its build folder from each slice file's path, length and modified
-            // time (`kept_build`). A copy stamped now (Linux's copy and clone) would name another
-            // folder every attempt, and no kept library would ever be found there.
-            times_handle(&to)?.set_modified(meta.modified()?)?;
+            if link_or_copy(&entry.path(), &to)? == Placed::Copied {
+                times_handle(&to)?.set_modified(meta.modified()?)?;
+            }
+            let mut permissions = fs::metadata(&to)?.permissions();
+            permissions.set_readonly(true);
+            fs::set_permissions(&to, permissions)?;
         } else {
             return Err(invalid());
         }
@@ -443,6 +659,8 @@ fn checked_under(root: &Path, file: &Path, directory: bool) -> io::Result<()> {
     }
     Err(invalid())
 }
+
+mod downloads;
 
 #[cfg(test)]
 mod tests;

@@ -7,10 +7,11 @@ use crate::{backend, instances, native_mods};
 use serde::Serialize;
 use std::sync::Arc;
 
-const BUILD_CACHES: [BuildCache; 10] = [
+const BUILD_CACHES: [BuildCache; 11] = [
     BuildCache::Source,
     BuildCache::Tools,
     BuildCache::PrebuiltOutput,
+    BuildCache::KeptBuilds,
     BuildCache::InternalsSync,
     BuildCache::Prebuilt,
     BuildCache::ServerBuilds,
@@ -63,8 +64,20 @@ impl Report {
             row.bytes = row.bytes.saturating_add(bytes);
             row.remaining_bytes = row.remaining_bytes.saturating_add(bytes);
             self.total_bytes = self.total_bytes.saturating_add(bytes);
-            row.kept.push(Kept { bytes, reason: crate::i18n::tr("Private compiler work was kept because the launcher couldn't prove all workers had stopped.").into() });
+            row.kept.push(Kept { bytes, reason: crate::i18n::tr("Old build files from an earlier launcher are kept until the launcher can prove no build still uses them. They are removed on the next cleanup once it can.").into() });
         }
+    }
+
+    /// Attempt folders removed before the walk count as cleaned up, not as something that was there.
+    fn include_removed_attempts(&mut self, bytes: u64) {
+        let row = self
+            .rows
+            .iter_mut()
+            .find(|r| r.category == Category::BuildFiles)
+            .expect("report contains Build files");
+        row.bytes = row.bytes.saturating_add(bytes);
+        row.freed_bytes = row.freed_bytes.saturating_add(bytes);
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
     }
 }
 
@@ -177,11 +190,19 @@ impl Entry {
             }
         } else if parent == Path::new("native/source") {
             name
+        } else if parent == Path::new("native/k") {
+            // The first 5 of the game commit, then 3 of the hash of what the build was made
+            // from: all 8 lowercase hex.
+            name.get(..5).filter(|_| {
+                name.len() == 8 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            })?
         } else {
             return None;
         };
         let expected = if parent == Path::new("native/tools") {
             12
+        } else if parent == Path::new("native/k") {
+            5
         } else {
             40
         };
@@ -271,8 +292,11 @@ impl Entry {
     fn access(&self) -> Result<Access, Error> {
         match self.category {
             Category::RustCompiler => Ok(Access::BuildTools),
-            // No game runs from kept mod libraries: a build copies them into its workspace.
-            _ if self.relative.starts_with(BuildCache::KeptMods.relative()) => {
+            // No game runs from kept mod libraries or kept build folders: a build copies its
+            // libraries out of them into the game build it installs.
+            _ if self.relative.starts_with(BuildCache::KeptMods.relative())
+                || self.relative.starts_with(BuildCache::KeptBuilds.relative()) =>
+            {
                 Ok(Access::BuildTools)
             }
             _ => Access::for_unit(&self.path),
@@ -325,6 +349,7 @@ impl Storage {
                     | BuildCache::Source
                     | BuildCache::Tools
                     | BuildCache::PrebuiltOutput
+                    | BuildCache::KeptBuilds
                     | BuildCache::Prebuilt
                     | BuildCache::InternalsSync
             ) {
@@ -521,7 +546,7 @@ impl Storage {
         Ok(())
     }
 
-    /// Not deletion candidates: an unproved worker can still be writing to them.
+    /// Attempt folders whose owner isn't proven gone or that couldn't be removed.
     fn retained_compiler_bytes(
         &self,
         counted: &mut HashSet<(u64, u64)>,
@@ -559,6 +584,7 @@ impl Storage {
         mut before_clear: impl FnMut(&Path),
     ) -> Result<Report, Error> {
         use super::policy::{self, Tier, Unit};
+        let removed = self.remove_leftover_attempts()?;
         let entries = self.entries()?;
         for entry in &entries {
             entry.last_used()?;
@@ -614,6 +640,7 @@ impl Storage {
                     "native/tools",
                     "native/internals-sync",
                     "native/prebuilt",
+                    "native/k",
                 ]
                 .iter()
                 .any(|root| entry.relative.starts_with(root))
@@ -633,7 +660,10 @@ impl Storage {
                             let length = revision.len().min(unit_revision.len());
                             revision.get(..length) == unit_revision.get(..length)
                         });
-                    if used && entry.category == Category::PrebuiltGames {
+                    if used
+                        && (entry.category == Category::PrebuiltGames
+                            || entry.relative.starts_with("native/k"))
+                    {
                         Tier::Lru
                     } else if used {
                         Tier::Protected
@@ -727,6 +757,7 @@ impl Storage {
         }
         report.total_bytes = report.rows.iter().map(|row| row.bytes).sum();
         report.include_retained_compiler(retained);
+        report.include_removed_attempts(removed);
         Ok(report)
     }
 
@@ -745,6 +776,11 @@ impl Storage {
         );
         // Also refuse an external Cargo holding a target lock before starting a cleanup.
         self.lease.bytes()?;
+        let removed = if clear.is_some() || all {
+            self.remove_leftover_attempts()?
+        } else {
+            0
+        };
         if clear.is_some() || all {
             use sunrise_launcher_smod::runtime_leases::{cleanup::Cleanup, Error as LeaseError};
             match Cleanup::existing(&backend::data_dir()) {
@@ -759,6 +795,7 @@ impl Storage {
         let entries = self.entries()?;
         let mut report = self.apply_retaining(entries, clear, all, true)?;
         report.include_retained_compiler(self.retained_compiler_bytes(&mut HashSet::new())?);
+        report.include_removed_attempts(removed);
         if clear.is_none() && !all {
             for entry in self.entries()? {
                 if let Err(error) = entry.access().and_then(|access| access.check()) {
@@ -1035,6 +1072,12 @@ mod eviction_tests {
         for (path, expected) in [
             (format!("native/source/{sha}"), Some(sha)),
             (format!("native/source/not-{sha}"), None),
+            (format!("native/k/{}abc", &sha[..5]), Some(&sha[..5])),
+            ("native/k/abc-1".to_owned(), None),
+            (format!("native/k/{}", &sha[..5]), None),
+            ("native/k/01234ABC".to_owned(), None),
+            (format!("native/k/{}abcd", &sha[..5]), None),
+            (format!("native/k/{}-ab", &sha[..5]), None),
             (format!("native/tools/{}", &sha[..12]), Some(&sha[..12])),
             (
                 format!("native/prebuilt/{sha}-sunrise-prebuilt-v3-x86_64-unknown-linux-gnu"),
@@ -1203,6 +1246,19 @@ mod eviction_tests {
         assert!(ordinary.total_bytes > 0 && cache.exists());
         let old_worker = home.seed("native/.nb-old/compiler/w");
         let older_launchers = home.seed("native/.native-attempt-older/compiler/work");
+        // Their builds are running: each holds its folder's owner lock.
+        let _owners = [&old_worker, &older_launchers].map(|file| {
+            let owner = fs::File::create(
+                file.parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join(native_mods::attempt_owner::FILE),
+            )
+            .unwrap();
+            owner.try_lock().unwrap();
+            owner
+        });
         let report = storage
             .evict_inventory(now, Some(ordinary.total_bytes))
             .unwrap();

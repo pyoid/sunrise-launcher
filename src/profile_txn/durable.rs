@@ -429,6 +429,14 @@ pub(crate) fn flush_tree(path: &Path) -> io::Result<()> {
         sync_directory(path)?;
         Ok(())
     } else if meta.is_file() {
+        // Windows flushes only through a handle that may write, and a read-only file gives none.
+        // In a build being published those are links into the read-only SDK package, whose
+        // bytes the SDK cache wrote, not this install (`links::link_or_copy` leaves a copy
+        // writable there).
+        #[cfg(windows)]
+        if meta.permissions().readonly() {
+            return Ok(());
+        }
         #[cfg(windows)]
         let file = File::options().write(true).open(path)?;
         #[cfg(not(windows))]

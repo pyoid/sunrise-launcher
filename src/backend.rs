@@ -2657,7 +2657,7 @@ fn complete_assets_in(
     let Some(binary) = crate::preparer::binary(&root) else {
         return;
     };
-    let checking = crate::launcher_log::step("Checking game files");
+    let checking = crate::launcher_log::step(format!("Checking {tag} for missing extra files"));
     let lacking = match crate::preparer::missing_extras(&binary, &root, &resources, handoff) {
         Ok(Some(lacking)) if !lacking.is_empty() => {
             checking.done(format!("{} to fetch", lacking.len()));

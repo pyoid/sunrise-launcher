@@ -29,7 +29,10 @@ use sunrise_launcher_release_verify::{PublicKey, SIGNATURE, SIGNATURE_V2, SUMS};
 use sunrise_launcher_sdk::{self as sdk, Asset, Index, Kind, Side, INDEX};
 
 mod game;
+mod stamp;
 pub(crate) use game::{check_game_offer, offers_game, stage_game, GameSlices};
+pub(super) use stamp::{listing, verify_slice};
+use stamp::{record, stamp_holds, stamp_path, upgrade};
 
 /// The SDK's three compiled slices of one build, each in its own folder (`runtime`, `api`, `engine`).
 #[derive(Clone, Debug, PartialEq)]
@@ -647,22 +650,25 @@ pub(super) fn tool(sdk: &Sdk, base: &Base, progress: &dyn Fn(Fetched)) -> Result
         super::root()
             .join("prebuilt")
             .join(format!("{}-{}-tool", sdk.commit(), host.target));
-    let mut fetched = Fetched::default();
-    for name in &names {
-        if !stamp_holds(sdk, name, &into) {
-            fetched.total += sdk
-                .index
-                .asset(name)
-                .map_err(|r| refused(r.to_string()))?
-                .size;
-        }
-    }
-    progress(fetched);
-    for name in &names {
-        fetch_into(sdk, base, name, &into, &mut fetched, progress)?;
-    }
+    let wanted: Vec<_> = names
+        .iter()
+        .map(|name| (name.as_str(), into.as_path()))
+        .collect();
+    keep_or_fetch(sdk, base, &wanted, progress)?;
     crate::storage::mark_used(&into).map_err(|error| Refusal::Cache(super::cache_error(error)))?;
     Ok(into.join(super::tool::PROGRAM))
+}
+
+/// What names the tool of `sdk` on `target`: the checksums its signed index lists for the tool's
+/// assets, which [`tool`] has already proved the unpacked files match. Part of the kept libraries'
+/// key, so a build by another tool never reuses them.
+pub(super) fn tool_identity(sdk: &Sdk, target: &str) -> Result<String, sdk::Refusal> {
+    let names = sdk.index.route_assets("tool", target, Side::Client)?;
+    let sums = names
+        .iter()
+        .map(|name| Ok(sdk.index.asset(name)?.sha256.as_str()))
+        .collect::<Result<Vec<_>, sdk::Refusal>>()?;
+    Ok(sums.join(","))
 }
 
 /// Names a developer's own `cargo-sunrise-mod`, built from the same checkout as [`DEVELOPER_SDK`]'s folder: the tool its builds run.
@@ -773,78 +779,48 @@ fn slices_in(
             .ok_or_else(|| refused(sdk::Refusal::AssetName(name.clone()).to_string()))?;
         wanted.push((name.as_str(), folder(kind)?));
     }
-    let mut fetched = Fetched::default();
-    for (name, into) in &wanted {
-        if !stamp_holds(sdk, name, into) {
-            fetched.total += sdk
-                .index
-                .asset(name)
-                .map_err(|r| refused(r.to_string()))?
-                .size;
-        }
-    }
-    progress(fetched);
-    for (name, into) in &wanted {
-        fetch_into(sdk, base, name, into, &mut fetched, progress)?;
-    }
+    let wanted: Vec<_> = wanted
+        .iter()
+        .map(|(name, into)| (*name, into.as_path()))
+        .collect();
+    keep_or_fetch(sdk, base, &wanted, progress)?;
     Ok(package)
 }
 
-/// What a stamp says: the index that listed the archive, the archive, and every file it
-/// unpacked to with its size.
-#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-struct Stamp {
-    index: String,
-    asset: String,
-    files: BTreeMap<String, u64>,
-}
-
-fn stamp_path(into: &Path) -> PathBuf {
-    let mut path = into.as_os_str().to_owned();
-    path.push(STAMP_SUFFIX);
-    PathBuf::from(path)
-}
-
-/// Every file under `dir`, `/`-separated relative to it, with its size; `None` when it can't
-/// be read or holds anything but files and folders.
-fn listing(dir: &Path) -> Option<BTreeMap<String, u64>> {
-    fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, u64>) -> Option<()> {
-        for entry in fs::read_dir(dir).ok()? {
-            let entry = entry.ok()?;
-            let kind = entry.file_type().ok()?;
-            let path = entry.path();
-            if kind.is_dir() {
-                walk(root, &path, out)?;
-            } else if kind.is_file() {
-                let relative = path.strip_prefix(root).ok()?;
-                let name = relative
-                    .components()
-                    .map(|part| part.as_os_str().to_str())
-                    .collect::<Option<Vec<_>>>()?
-                    .join("/");
-                out.insert(name, entry.metadata().ok()?.len());
-            } else {
-                return None;
-            }
+/// Each of `wanted`, an archive of the index and the folder it unpacks to, is kept when its stamp
+/// holds and fetched again when not. Each folder is walked once. `progress` hears the bytes
+/// fetched of all that must be, before and while.
+fn keep_or_fetch(
+    sdk: &Sdk,
+    base: &Base,
+    wanted: &[(&str, &Path)],
+    progress: &dyn Fn(Fetched),
+) -> Result<(), Refusal> {
+    let mut fetched = Fetched::default();
+    let mut stale = Vec::new();
+    for (name, into) in wanted {
+        let holds = stamp_holds(sdk, name, into);
+        if !holds {
+            fetched.total += sdk
+                .index
+                .asset(name)
+                .map_err(|r| Refusal::Refused {
+                    build: sdk.shown(),
+                    why: r.to_string(),
+                })?
+                .size;
         }
-        Some(())
+        stale.push(!holds);
     }
-    let mut out = BTreeMap::new();
-    walk(dir, dir, &mut out)?;
-    Some(out)
-}
-
-/// Whether `into` is `name` as `sdk`'s index lists it: its stamp names this index and this
-/// archive, and the folder holds exactly the files the stamp lists, each at its size. No file is
-/// hashed: the unpack checked the archive before the stamp was written.
-fn stamp_holds(sdk: &Sdk, name: &str, into: &Path) -> bool {
-    let Ok(text) = fs::read(stamp_path(into)) else {
-        return false;
-    };
-    let Ok(stamp) = serde_json::from_slice::<Stamp>(&text) else {
-        return false;
-    };
-    stamp.index == sdk.sha256 && stamp.asset == name && listing(into) == Some(stamp.files)
+    progress(fetched);
+    for ((name, into), stale) in wanted.iter().zip(stale) {
+        if stale {
+            refetch_into(sdk, base, name, into, &mut fetched, None, progress)?;
+        } else {
+            upgrade(sdk, name, into)?;
+        }
+    }
+    Ok(())
 }
 
 /// `name` unpacked at `into`: kept when its stamp holds; otherwise what is there is removed,
@@ -879,8 +855,27 @@ fn fetch_into_cancellable(
         stop.check().map_err(refused)?;
     }
     if stamp_holds(sdk, name, into) {
-        return Ok(());
+        return upgrade(sdk, name, into);
     }
+    refetch_into(sdk, base, name, into, fetched, stop, progress)
+}
+
+/// [`fetch_into`] for a slice already found not to hold: what is there is removed and `name`
+/// fetched and unpacked again.
+fn refetch_into(
+    sdk: &Sdk,
+    base: &Base,
+    name: &str,
+    into: &Path,
+    fetched: &mut Fetched,
+    stop: Option<&super::Cancellation>,
+    progress: &dyn Fn(Fetched),
+) -> Result<(), Refusal> {
+    let build = sdk.shown();
+    let refused = |why: String| Refusal::Refused {
+        build: build.clone(),
+        why,
+    };
     let cache = |error: std::io::Error| Refusal::Cache(format!("{}: {error}", into.display()));
     let size = sdk
         .index
@@ -991,19 +986,7 @@ fn fetch_into_cancellable(
         | sdk::Refusal::Rename { .. } => Refusal::Cache(refusal.to_string()),
         other => refused(other.to_string()),
     })?;
-    let files = listing(into).ok_or_else(|| {
-        Refusal::Cache(trf(
-            "{folder} holds something other than files and folders",
-            &[("folder", &into.display().to_string())],
-        ))
-    })?;
-    let stamp_text = serde_json::to_vec(&Stamp {
-        index: sdk.sha256.clone(),
-        asset: name.to_owned(),
-        files,
-    })
-    .expect("a stamp serializes");
-    write_whole(&stamp, &stamp_text)?;
+    record(sdk, name, into)?;
     fetched.done = start + size;
     progress(*fetched);
     Ok(())
