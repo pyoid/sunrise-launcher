@@ -63,8 +63,20 @@ impl Report {
             row.bytes = row.bytes.saturating_add(bytes);
             row.remaining_bytes = row.remaining_bytes.saturating_add(bytes);
             self.total_bytes = self.total_bytes.saturating_add(bytes);
-            row.kept.push(Kept { bytes, reason: crate::i18n::tr("Private compiler work was kept because the launcher couldn't prove all workers had stopped.").into() });
+            row.kept.push(Kept { bytes, reason: crate::i18n::tr("Old build files from an earlier launcher are kept until the launcher can prove no build still uses them. They are removed on the next cleanup once it can.").into() });
         }
+    }
+
+    /// Attempt folders removed before the walk count as cleaned up, not as something that was there.
+    fn include_removed_attempts(&mut self, bytes: u64) {
+        let row = self
+            .rows
+            .iter_mut()
+            .find(|r| r.category == Category::BuildFiles)
+            .expect("report contains Build files");
+        row.bytes = row.bytes.saturating_add(bytes);
+        row.freed_bytes = row.freed_bytes.saturating_add(bytes);
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
     }
 }
 
@@ -177,10 +189,15 @@ impl Entry {
             }
         } else if parent == Path::new("native/source") {
             name
+        } else if parent == Path::new("native/prebuilt-build") {
+            // `<first 12 of the game commit>-<hash of what the build was made from>`.
+            name.split_once('-').map(|(revision, _)| revision)?
         } else {
             return None;
         };
-        let expected = if parent == Path::new("native/tools") {
+        let expected = if parent == Path::new("native/tools")
+            || parent == Path::new("native/prebuilt-build")
+        {
             12
         } else {
             40
@@ -521,7 +538,7 @@ impl Storage {
         Ok(())
     }
 
-    /// Not deletion candidates: an unproved worker can still be writing to them.
+    /// Attempt folders whose owner isn't proven gone or that couldn't be removed.
     fn retained_compiler_bytes(
         &self,
         counted: &mut HashSet<(u64, u64)>,
@@ -559,6 +576,7 @@ impl Storage {
         mut before_clear: impl FnMut(&Path),
     ) -> Result<Report, Error> {
         use super::policy::{self, Tier, Unit};
+        let removed = self.remove_leftover_attempts()?;
         let entries = self.entries()?;
         for entry in &entries {
             entry.last_used()?;
@@ -614,6 +632,7 @@ impl Storage {
                     "native/tools",
                     "native/internals-sync",
                     "native/prebuilt",
+                    "native/prebuilt-build",
                 ]
                 .iter()
                 .any(|root| entry.relative.starts_with(root))
@@ -633,7 +652,10 @@ impl Storage {
                             let length = revision.len().min(unit_revision.len());
                             revision.get(..length) == unit_revision.get(..length)
                         });
-                    if used && entry.category == Category::PrebuiltGames {
+                    if used
+                        && (entry.category == Category::PrebuiltGames
+                            || entry.relative.starts_with("native/prebuilt-build"))
+                    {
                         Tier::Lru
                     } else if used {
                         Tier::Protected
@@ -727,6 +749,7 @@ impl Storage {
         }
         report.total_bytes = report.rows.iter().map(|row| row.bytes).sum();
         report.include_retained_compiler(retained);
+        report.include_removed_attempts(removed);
         Ok(report)
     }
 
@@ -745,6 +768,11 @@ impl Storage {
         );
         // Also refuse an external Cargo holding a target lock before starting a cleanup.
         self.lease.bytes()?;
+        let removed = if clear.is_some() || all {
+            self.remove_leftover_attempts()?
+        } else {
+            0
+        };
         if clear.is_some() || all {
             use sunrise_launcher_smod::runtime_leases::{cleanup::Cleanup, Error as LeaseError};
             match Cleanup::existing(&backend::data_dir()) {
@@ -759,6 +787,7 @@ impl Storage {
         let entries = self.entries()?;
         let mut report = self.apply_retaining(entries, clear, all, true)?;
         report.include_retained_compiler(self.retained_compiler_bytes(&mut HashSet::new())?);
+        report.include_removed_attempts(removed);
         if clear.is_none() && !all {
             for entry in self.entries()? {
                 if let Err(error) = entry.access().and_then(|access| access.check()) {
@@ -1035,6 +1064,11 @@ mod eviction_tests {
         for (path, expected) in [
             (format!("native/source/{sha}"), Some(sha)),
             (format!("native/source/not-{sha}"), None),
+            (format!("native/prebuilt-build/{}-abcd", &sha[..12]), Some(&sha[..12])),
+            ("native/prebuilt-build/abc-1".to_owned(), None),
+            (format!("native/prebuilt-build/{}", &sha[..12]), None),
+            ("native/prebuilt-build/0123456789AB-abcd".to_owned(), None),
+            (format!("native/prebuilt-build/{}-abcd", &sha[..13]), None),
             (format!("native/tools/{}", &sha[..12]), Some(&sha[..12])),
             (
                 format!("native/prebuilt/{sha}-sunrise-prebuilt-v3-x86_64-unknown-linux-gnu"),
@@ -1203,6 +1237,19 @@ mod eviction_tests {
         assert!(ordinary.total_bytes > 0 && cache.exists());
         let old_worker = home.seed("native/.nb-old/compiler/w");
         let older_launchers = home.seed("native/.native-attempt-older/compiler/work");
+        // Their builds are running: each holds its folder's owner lock.
+        let _owners = [&old_worker, &older_launchers].map(|file| {
+            let owner = fs::File::create(
+                file.parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join(native_mods::attempt_owner::FILE),
+            )
+            .unwrap();
+            owner.try_lock().unwrap();
+            owner
+        });
         let report = storage
             .evict_inventory(now, Some(ordinary.total_bytes))
             .unwrap();

@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod attempts;
 pub mod eviction;
 mod inventory;
 pub mod policy;

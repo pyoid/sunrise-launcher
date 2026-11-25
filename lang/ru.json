@@ -1965,5 +1965,6 @@
   "Log saved": "Log saved",
   "Couldn't save the log: {reason}": "Couldn't save the log: {reason}",
   "Nothing has been logged yet.": "Nothing has been logged yet.",
-  "The game's output shows here while it runs.": "The game's output shows here while it runs."
+  "The game's output shows here while it runs.": "The game's output shows here while it runs.",
+  "Old build files from an earlier launcher are kept until the launcher can prove no build still uses them. They are removed on the next cleanup once it can.": "Old build files from an earlier launcher are kept until the launcher can prove no build still uses them. They are removed on the next cleanup once it can."
 }
