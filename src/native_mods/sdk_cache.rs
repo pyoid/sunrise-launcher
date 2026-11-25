@@ -659,6 +659,18 @@ pub(super) fn tool(sdk: &Sdk, base: &Base, progress: &dyn Fn(Fetched)) -> Result
     Ok(into.join(super::tool::PROGRAM))
 }
 
+/// What names the tool of `sdk` on `target`: the checksums its signed index lists for the tool's
+/// assets, which [`tool`] has already proved the unpacked files match. Part of the kept libraries'
+/// key, so a build by another tool never reuses them.
+pub(super) fn tool_identity(sdk: &Sdk, target: &str) -> Result<String, sdk::Refusal> {
+    let names = sdk.index.route_assets("tool", target, Side::Client)?;
+    let sums = names
+        .iter()
+        .map(|name| Ok(sdk.index.asset(name)?.sha256.as_str()))
+        .collect::<Result<Vec<_>, sdk::Refusal>>()?;
+    Ok(sums.join(","))
+}
+
 /// Names a developer's own `cargo-sunrise-mod`, built from the same checkout as [`DEVELOPER_SDK`]'s folder: the tool its builds run.
 pub(super) const DEVELOPER_TOOL: &str = "SUNRISE_LAUNCHER_DEVELOPER_TOOL";
 

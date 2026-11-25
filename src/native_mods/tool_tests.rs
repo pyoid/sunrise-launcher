@@ -799,3 +799,80 @@ fn a_one_line_command_gets_its_name_and_a_contract_and_answers_one_line() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_tool_on_a_newer_contract_is_told_to_update_the_launcher() {
+    let said = ended(Some(3), Some(CONTRACT + 1));
+    assert!(
+        said.contains("too old for this SDK's native build tool"),
+        "{said}"
+    );
+    assert!(said.contains("update the launcher"), "{said}");
+}
+
+#[test]
+fn a_tool_on_an_older_contract_is_told_to_be_replaced_not_the_launcher() {
+    let said = ended(Some(3), Some(CONTRACT - 1));
+    assert!(said.contains("tool is too old for this launcher"), "{said}");
+    assert!(!said.contains("update the launcher"), "{said}");
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "daily"]
+fn a_check_whose_reply_names_an_older_contract_says_the_tool_is_old() {
+    let _guard = super::super::tests::scratch_state();
+    let dir =
+        std::env::temp_dir().join(format!("sunrise-native-check-older-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    fake(&dir, &[r#"{"contract":1}"#, "EXIT3"]);
+    let plan = serde_json::json!({"contract": CONTRACT});
+    let failure = check(&dir.join("tool"), &plan, &Cancellation::default(), None).unwrap_err();
+    assert!(
+        matches!(&failure, CheckFailure::Refused(text) if text.contains("tool is too old for this launcher")),
+        "{failure:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "daily"]
+fn the_tool_start_time_is_the_first_message() {
+    use std::os::unix::fs::PermissionsExt;
+    let _guard = super::super::tests::scratch_state();
+    let dir =
+        std::env::temp_dir().join(format!("sunrise-native-tool-start-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let program = dir.join("tool");
+    std::fs::write(
+        &program,
+        "#!/bin/sh\nread plan\nsleep 0.2\necho '{\"event\":\"mod\",\"id\":\"greeter\",\"done\":1,\"total\":1}'\nexit 2\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    super::super::clear_log().unwrap();
+    let _ = run(
+        std::process::Command::new(program),
+        "{}",
+        &|_, _, _| {},
+        &Cancellation::default(),
+        None,
+        None,
+    );
+    let log = std::fs::read_to_string(super::super::log_path()).unwrap();
+    let line = log
+        .lines()
+        .find(|line| line.starts_with("SDK tool first message after "))
+        .expect(&log);
+    let ms: u128 = line
+        .trim_start_matches("SDK tool first message after ")
+        .split(' ')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(ms >= 200, "{line}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

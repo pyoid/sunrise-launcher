@@ -14,6 +14,7 @@ use sunrise_launcher_smod::dependencies;
 
 mod build_log;
 mod bundle;
+mod stages;
 use build_log::log_warning;
 pub(crate) use build_log::root;
 pub use build_log::{
@@ -1489,6 +1490,18 @@ fn build_stages(
     let cancellation = &options.cancellation;
     cancellation.check()?;
     let started = std::time::Instant::now();
+    // The steps around the mods' compile, timed like each command (`run_checked`), so the log
+    // accounts for the whole build. Each line also goes to the Logs panel, and the stage
+    // times are summed up in one line at the end.
+    let timed = |step: &str, took: std::time::Duration| {
+        let line = trf(
+            "{step}: {ms} ms",
+            &[("step", step), ("ms", &took.as_millis().to_string())],
+        );
+        crate::launcher_log::line(&line);
+        append_log(&line).map(|()| took)
+    };
+    let mut stages = stages::Stages::default();
     let built_on = checked_about(base)?;
     backend::need_prepared(base)?;
     let platform = platform_for_game(base)?;
@@ -1521,6 +1534,8 @@ fn build_stages(
         .iter()
         .map(|b| (b.manifest.id.clone(), source_digest(b)))
         .collect();
+    stages.reading = Some(timed("Reading the mods", started.elapsed())?);
+    let planning = std::time::Instant::now();
     // The cache identifies every requested input, including a mod left out after a failure:
     // replacing its files must retry it rather than reuse a build that excluded the old copy.
     let requested: Vec<Bundle> = found
@@ -1634,6 +1649,7 @@ fn build_stages(
     let mut route = None;
     if let Some(sdk) = &sdk {
         progress(Step::Checking(ids.len()));
+        let asking = std::time::Instant::now();
         let checks = check_all(
             check_folder,
             &ids,
@@ -1642,6 +1658,10 @@ fn build_stages(
             cancellation,
             options.staging,
         )?;
+        stages.check = Some(timed(
+            "Asking the SDK tool to check the mods",
+            asking.elapsed(),
+        )?);
         if let Some((id, why)) = checks.refusals.first() {
             return Err(refusal_text(id, why).into());
         }
@@ -1790,18 +1810,7 @@ fn build_stages(
         stage.retain_target(&version)?;
     }
     let exists = target.directory(&version).join(".installed").is_file();
-    // The steps around the mods' compile, timed like each command (`run_checked`), so the log
-    // accounts for the whole build.
-    let timed = |step: &str, since: std::time::Instant| {
-        append_log(&trf(
-            "{step}: {ms} ms",
-            &[
-                ("step", step),
-                ("ms", &since.elapsed().as_millis().to_string()),
-            ],
-        ))
-    };
-    timed("Planning the build", started)?;
+    stages.planning = Some(timed("Planning the build", planning.elapsed())?);
     let fetching = std::time::Instant::now();
     let prebuilt = if exists {
         None
@@ -1864,6 +1873,7 @@ fn build_stages(
                 let route = match route {
                     Some(route) => route,
                     None => {
+                        let asking = std::time::Instant::now();
                         let checks = check_all(
                             check_folder,
                             &ids,
@@ -1872,6 +1882,9 @@ fn build_stages(
                             cancellation,
                             options.staging,
                         )?;
+                        let asked =
+                            timed("Asking the SDK tool to check the mods", asking.elapsed())?;
+                        stages.check = Some(stages.check.unwrap_or_default() + asked);
                         if let Some((id, why)) = checks.refusals.first() {
                             return Err(refusal_text(id, why).into());
                         }
@@ -1892,7 +1905,7 @@ fn build_stages(
         Some(package)
     };
     if prebuilt.is_some() {
-        timed("Checking the prebuilt game", fetching)?;
+        stages.prebuilt = Some(timed("Checking the prebuilt game", fetching.elapsed())?);
     }
     cancellation.check()?;
     let plan = if exists {
@@ -1962,7 +1975,7 @@ fn build_stages(
                 Failed::Tools(error)
             }
         })?;
-        timed("Checking the Rust toolchain", checking)?;
+        stages.toolchain = Some(timed("Checking the Rust toolchain", checking.elapsed())?);
         let mixins_from_source = MIXINS_FROM_SOURCE.load(std::sync::atomic::Ordering::Relaxed);
         // One folder for every build of this game build: its profiles share the compiled files.
         let (mut workspace, opened) = workspace::Workspace::open(
@@ -2002,19 +2015,24 @@ fn build_stages(
             }
             _ => {}
         }
+        let copying = std::time::Instant::now();
         for bundle in &mods {
             copy_bundle(bundle, &compiled.join(&bundle.manifest.id))?;
         }
+        let copied = copying.elapsed();
+        let packaging = std::time::Instant::now();
         let game = workspace
             .lay_out_package(game, signed_sdk.as_deref(), &|line| {
                 let _ = append_log(line);
             })
             .map_err(|e| e.to_string())?;
+        stages.package = Some(timed("Laying out the SDK package", packaging.elapsed())?);
         let work = workspace.work();
         // A package carries the registry lock `cargo sunrise-mod build` wrote; a source folder may
         // have none yet. It gets the lock `native-lock` writes, from this build's tool and with
         // the same kept game lock, which runs none of the mod's code. The author's folder is
         // never written to.
+        let locking = std::time::Instant::now();
         for bundle in &mods {
             let copy = compiled.join(&bundle.manifest.id);
             if !copy.join("Cargo.lock").exists() {
@@ -2029,6 +2047,7 @@ fn build_stages(
                 )?;
             }
         }
+        stages.staging = Some(timed("Staging the mods", copied + locking.elapsed())?);
         // This folder's own cargo home gets the shared downloads by links; the tool fetches
         // offline when nothing changed since its last fetch here.
         let filled = workspace
@@ -2053,12 +2072,12 @@ fn build_stages(
         // compiles only the mods whose own inputs changed. Without them, every mod compiles.
         let seeding = std::time::Instant::now();
         let kept_store = kept::Kept::new(&root());
-        let kept_plan = match (signed_sdk, expected_route) {
-            (Some(sdk), Some(route)) => plan_kept(
+        let kept_plan = match (&sdk, signed_sdk, expected_route) {
+            (Some(full), Some(sdk), Some(route)) => plan_kept(
                 &kept::Build {
                     sdk,
-                    tool: &sunrise_launcher_smod::index::sha256_file(program)
-                        .map_err(Failed::Other)?,
+                    tool: &sdk_cache::tool_identity(full, rust.host.target)
+                        .map_err(|e| Failed::Other(e.to_string()))?,
                     route: route.name(),
                     revision: &revision,
                     mixins: &mixins,
@@ -2085,10 +2104,11 @@ fn build_stages(
                         "Reusing the libraries kept from an earlier build: {mods}",
                         &[("mods", &reused.join(", "))],
                     ),
-                    seeding,
+                    seeding.elapsed(),
                 )?;
             }
         }
+        let running = std::time::Instant::now();
         let built = tool::build(
             &rust,
             program,
@@ -2118,6 +2138,8 @@ fn build_stages(
         // Don't turn a stopped tool into an attributed compile failure.
         cancellation.check()?;
         let built = built.map_err(blame)?;
+        stages.tool = Some(timed("The SDK tool ran for", running.elapsed())?);
+        let verifying = std::time::Instant::now();
         let libraries = workspace
             .verify_outputs(
                 &built,
@@ -2132,6 +2154,7 @@ fn build_stages(
                 tr("The native build tool's output couldn't be verified. See the build log.")
                     .to_owned()
             })?;
+        stages.verify = Some(timed("Verifying the build's outputs", verifying.elapsed())?);
         match workspace.publish_downloads(&rust_toolchain::cargo_home()) {
             Ok((published, 0)) => append_log(&format!("Shared {published} downloaded crates.")),
             Ok((published, left_out)) => append_log(&format!(
@@ -2167,7 +2190,7 @@ fn build_stages(
             &ordered,
             cancellation,
         )?;
-        timed("Installing the build", installing)?;
+        stages.install = Some(timed("Installing the build", installing.elapsed())?);
         // Kept only once the build they verified is installed, and only while the attempt
         // hasn't been stopped: a stopped build keeps nothing. A failure here costs only the
         // next build's time.
@@ -2175,7 +2198,12 @@ fn build_stages(
             let keeping = std::time::Instant::now();
             match kept_store.save(&work, &built, &libraries, &plan.mods, &plan.keys) {
                 Ok(0) => {}
-                Ok(_) => timed("Keeping the mods' libraries for the next build", keeping)?,
+                Ok(_) => {
+                    timed(
+                        "Keeping the mods' libraries for the next build",
+                        keeping.elapsed(),
+                    )?;
+                }
                 Err(error) => log_warning(&trf(
                     "The mods' libraries couldn't be kept for the next build: {error}",
                     &[("error", &error.to_string())],
@@ -2186,6 +2214,10 @@ fn build_stages(
         // Used again: it counts as the newest of the builds kept (`prune`).
         let _ = fs::write(target.directory(&version).join(".installed"), "");
     }
+    timed("Native build total", started.elapsed())?;
+    let summary = stages.summary();
+    crate::launcher_log::line(&summary);
+    append_log(&summary)?;
     built.secs = started.elapsed().as_secs();
     Ok(built)
 }

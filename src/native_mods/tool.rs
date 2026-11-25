@@ -345,11 +345,13 @@ fn run(
         .arg("native-build")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped());
+    let spawned = Instant::now();
     let (mut child, errors) = start(command, cancellation, true, profile)?;
     if let Some(workspace) = workspace.as_deref_mut() {
         workspace.allow_worker().map_err(unrun)?;
     }
-    let result = talk(&mut child, plan, on_mod, cancellation);
+    let mut heard = Heard::default();
+    let result = talk(&mut child, plan, on_mod, cancellation, spawned, &mut heard);
     if result.is_err() && cancellation.state().tool.take().is_some() {
         // Don't wait on a tool which is still writing after a refused protocol message.
         let _ = child.child().kill();
@@ -381,10 +383,21 @@ fn run(
     }
     let errors = finish(cancellation, errors);
     cancellation.check()?;
+    // For `native-build` the tool's first message comes when a mod starts compiling, so this
+    // is its start-up, the package's layout and the staging together: `native-check`'s time
+    // is the tool's start-up alone.
+    if let Some(first) = heard.first {
+        let line = trf(
+            "SDK tool first message after {ms} ms (start, layout and staging)",
+            &[("ms", &first.as_millis().to_string())],
+        );
+        crate::launcher_log::line(&line);
+        super::append_log(&line)?;
+    }
     let outcome = match (result, status) {
         (Ok(Some(Ok(built))), Ok(status)) if status.success() => Ok(built),
         (Ok(Some(Err(failure))), Ok(status)) if status.code() == Some(1) => Err(failure),
-        (Ok(_), Ok(status)) => Err(ended(status.code()).into()),
+        (Ok(_), Ok(status)) => Err(ended(status.code(), heard.contract).into()),
         (Err(error), _) | (Ok(_), Err(error)) => Err(unrun(error).into()),
     };
     if outcome.is_err() {
@@ -437,13 +450,33 @@ pub(super) fn log_errors(errors: &str) {
     }
 }
 
+/// The `contract` a tool's line names, if it is a JSON object that has one.
+fn contract_of(line: &str) -> Option<u32> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    u32::try_from(value.get("contract")?.as_u64()?).ok()
+}
+
 /// Why the tool ended without its last line, from its exit code: 3 is a tool on another contract, 2 one that didn't take the request.
-pub(super) fn ended(code: Option<i32>) -> String {
+/// `contract` is the one the tool's own reply named: with it, the message names the side that is older.
+pub(super) fn ended(code: Option<i32>, contract: Option<u32>) -> String {
     match code {
-        Some(3) => crate::i18n::tr(
-            "This launcher is too old for this SDK's native build tool: update the launcher.",
-        )
-        .to_owned(),
+        Some(3) => match contract {
+            Some(theirs) if theirs > CONTRACT => crate::i18n::tr(
+                "This launcher is too old for this SDK's native build tool: update the launcher.",
+            )
+            .to_owned(),
+            Some(theirs) if theirs < CONTRACT => trf(
+                "This SDK's native build tool is too old for this launcher (it speaks contract {tool}, the launcher {launcher}): install a newer version of the game build.",
+                &[
+                    ("tool", &theirs.to_string()),
+                    ("launcher", &CONTRACT.to_string()),
+                ],
+            ),
+            _ => crate::i18n::tr(
+                "This launcher and this SDK's native build tool speak different contracts, and the tool didn't say which is older: update the launcher, or install a newer version of the game build.",
+            )
+            .to_owned(),
+        },
         Some(2) => crate::i18n::tr(
             "The native build tool didn't accept the launcher's request: see the build log.",
         )
@@ -523,12 +556,22 @@ impl Output {
     }
 }
 
+/// What `talk` noticed besides the events: when the tool first spoke, and the contract a line of its
+/// own named (what a tool on another contract says before it exits with 3).
+#[derive(Default)]
+struct Heard {
+    first: Option<Duration>,
+    contract: Option<u32>,
+}
+
 /// Sends the plan, answers the crates question and reads events until the last.
 fn talk(
     child: &mut crate::process::owned::Owned,
     plan: &str,
     on_mod: &dyn Fn(&str, usize, usize),
     cancellation: &Cancellation,
+    spawned: Instant,
+    heard: &mut Heard,
 ) -> std::io::Result<Option<Result<Built, Failure>>> {
     let mut input = child.child().stdin.take().expect("piped");
     writeln!(input, "{plan}")?;
@@ -538,7 +581,11 @@ fn talk(
         if terminal.is_some() && !line.trim().is_empty() {
             return Err(std::io::Error::other(invalid_check_reply()));
         }
+        if !line.trim().is_empty() {
+            heard.first.get_or_insert_with(|| spawned.elapsed());
+        }
         let Ok(event) = serde_json::from_str::<Event>(&line) else {
+            heard.contract = heard.contract.or_else(|| contract_of(&line));
             continue;
         };
         match event {
@@ -758,7 +805,8 @@ fn ask_fenced(
         match (line, status.code()) {
             (line, Some(0)) => reply(line.as_deref(), true),
             (line, Some(1)) => reply(line.as_deref(), false),
-            (None, code) => Err(ended(code)),
+            (None, code) => Err(ended(code, None)),
+            (Some(line), Some(3)) => Err(ended(Some(3), contract_of(&line))),
             (Some(_), _) => Err(invalid_check_reply()),
         }
         .map_err(CheckFailure::Refused)
