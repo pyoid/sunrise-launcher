@@ -27,16 +27,15 @@ impl Storage {
             if !gone(&path) {
                 continue;
             }
-            #[cfg(target_os = "linux")]
             // A process can't be read for an instant while it execs (EACCES): a failed scan
             // is tried again a moment later before the folder is kept for the next cleanup.
-            let unused = (0..5).any(|attempt| {
+            #[cfg(target_os = "linux")]
+            if !(0..5).any(|attempt| {
                 if attempt > 0 {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
                 matches!(process_uses(&path), Ok(false))
-            });
-            if !unused {
+            }) {
                 continue;
             }
             let bytes = Tree::build(&path).map_or(0, |tree| tree.size(&mut HashSet::new()));
