@@ -116,10 +116,7 @@ impl Library {
             links::link_or_copy(&self.source, &output)?;
         } else {
             // Unlinked first: a carried file of this name may be a link into the base.
-            match fs::remove_file(&output) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-                _ => {}
-            }
+            links::remove_file(&output)?;
             crate::preparer::clone_or_copy(&self.source, &output)?;
         }
         // After a link this reads the source's own bytes, so it still proves them.

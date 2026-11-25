@@ -27,16 +27,17 @@ impl Storage {
             if !gone(&path) {
                 continue;
             }
-            // A process can't be read for an instant while it execs (EACCES): a failed scan
-            // is tried again a moment later before the folder is kept for the next cleanup.
             #[cfg(target_os = "linux")]
-            if !(0..5).any(|attempt| {
-                if attempt > 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
+            match process_uses(&path) {
+                Ok(false) => {}
+                Ok(true) => continue,
+                Err(error) => {
+                    crate::launcher_log::line(format!(
+                        "Kept the leftover build folder {}: the processes couldn't be read ({error}).",
+                        path.display()
+                    ));
+                    continue;
                 }
-                matches!(process_uses(&path), Ok(false))
-            }) {
-                continue;
             }
             let bytes = Tree::build(&path).map_or(0, |tree| tree.size(&mut HashSet::new()));
             // A folder in use, locked or refused stays: it is still counted and shown.
@@ -62,7 +63,7 @@ impl Storage {
 }
 
 /// Whether any process of this user has `folder` as its cwd, exe or root, or holds a file in it
-/// open. An unreadable entry of such a process is an error: the folder is then not proven unused.
+/// open. Any other failure to read `/proc` is an error: the folder is then not proven unused.
 #[cfg(target_os = "linux")]
 fn process_uses(folder: &Path) -> std::io::Result<bool> {
     use std::os::unix::fs::MetadataExt;
@@ -86,8 +87,14 @@ fn process_uses(folder: &Path) -> std::io::Result<bool> {
         }
         // A process that ends while it is read fails the read in more ways than NotFound (ESRCH
         // among them): an error from a process that is gone afterwards is no use of the folder.
+        // One this user can't read (EACCES: it isn't dumpable, or it changes credentials as it
+        // execs) is no compiler a build started: those run as the player and stay readable.
         let ended = |error: std::io::Error| {
-            if error.kind() == std::io::ErrorKind::NotFound || !process.exists() {
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            ) || !process.exists()
+            {
                 Ok(())
             } else {
                 Err(error)

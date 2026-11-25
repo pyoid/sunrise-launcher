@@ -9,6 +9,14 @@ fn claimed(folder: &Path) -> fs::File {
     file
 }
 
+/// What the Linux process scan says about `folder`, for a failed assertion's message.
+fn scan(folder: &Path) -> String {
+    #[cfg(target_os = "linux")]
+    return format!("process scan: {:?}", super::process_uses(folder));
+    #[cfg(not(target_os = "linux"))]
+    return format!("no process scan for {}", folder.display());
+}
+
 fn build_files(report: &Report) -> &Row {
     report
         .rows
@@ -26,7 +34,12 @@ fn leftover_attempt_without_owner_file_is_removed_by_cleanup() {
     let report = storage
         .evict_inventory(std::time::SystemTime::now(), None)
         .unwrap();
-    assert!(!old.exists() && !older.exists());
+    assert!(
+        !old.exists() && !older.exists(),
+        "{}; {}",
+        scan(&home.0.join("native/.nb-old")),
+        scan(&home.0.join("native/.native-attempt-a"))
+    );
     let row = build_files(&report);
     assert!(row.freed_bytes > 0);
     assert!(row.kept.is_empty());
@@ -51,7 +64,7 @@ fn attempt_with_a_live_owner_lock_is_kept() {
     );
     drop(owner);
     storage.evict_inventory(now, None).unwrap();
-    assert!(!file.exists());
+    assert!(!file.exists(), "{}", scan(file.parent().unwrap()));
 }
 
 #[test]
@@ -62,7 +75,7 @@ fn explicit_clear_removes_leftover_attempts_but_a_plain_report_does_not() {
     storage.report(None, false).unwrap();
     assert!(file.exists());
     storage.report(Some(Category::BuildFiles), false).unwrap();
-    assert!(!file.exists());
+    assert!(!file.exists(), "{}", scan(&home.0.join("native/.nb-old")));
 }
 
 #[cfg(target_os = "linux")]
