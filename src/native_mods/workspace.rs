@@ -77,6 +77,7 @@ pub(super) fn key(parts: &KeyParts<'_>) -> String {
 pub(super) struct Workspace {
     dir: PathBuf,
     _lock: crate::native_cache::Locked,
+    downloads: downloads::Downloads,
 }
 
 /// What [`Workspace::open`] found.
@@ -168,7 +169,14 @@ impl Workspace {
         }
         fs::create_dir_all(dir.join("tmp")).map_err(|e| e.to_string())?;
         crate::storage::mark_used(&dir).map_err(super::cache_error)?;
-        Ok((Self { dir, _lock: lock }, opened))
+        Ok((
+            Self {
+                dir,
+                _lock: lock,
+                downloads: downloads::Downloads::default(),
+            },
+            opened,
+        ))
     }
 
     pub(super) fn path(&self) -> &Path {
@@ -200,6 +208,10 @@ impl Workspace {
             .env("TMPDIR", &tmp)
             .env("TMP", &tmp)
             .env("TEMP", &tmp);
+        if self.offline() {
+            // The fetch the tool runs before cargo then only resolves the lock locally.
+            command.env("CARGO_NET_OFFLINE", "true");
+        }
         Ok(())
     }
 
@@ -577,6 +589,8 @@ fn checked_under(root: &Path, file: &Path, directory: bool) -> io::Result<()> {
     }
     Err(invalid())
 }
+
+mod downloads;
 
 #[cfg(test)]
 mod tests;
