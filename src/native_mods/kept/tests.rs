@@ -71,6 +71,7 @@ fn work_with(root: &Path, mods: &[(&str, &[u8])]) -> (PathBuf, Built, Vec<Librar
             name: file.clone(),
             source: path.clone(),
             sha256: sha256.clone(),
+            shared: false,
         });
         records.push(LibraryRecord {
             sha256,

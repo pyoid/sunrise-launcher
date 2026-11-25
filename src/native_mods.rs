@@ -2664,7 +2664,9 @@ mod installation;
 use installation::install;
 
 /// Copies version folder `from` into `to` but for what a new build of `target` makes its own
-/// ([`carried_over`]), cloned where the disk can. Also an imported build's start (`build_import`).
+/// ([`carried_over`]). Files no one rewrites after an install are hard links to the base's (a copy
+/// where the filesystem can't link); the folders the game rewrites ([`installation::mutable_in_place`])
+/// are cloned or copied. Also an imported build's start (`build_import`).
 pub(crate) fn copy_base(
     from: &Path,
     to: &Path,
@@ -2678,11 +2680,16 @@ pub(crate) fn copy_base(
         }
         let to = to.join(&name);
         let copied = if entry.path().is_dir() {
-            backend::copy_dir(&entry.path(), &to)
+            if installation::mutable_in_place(&name) {
+                backend::copy_dir(&entry.path(), &to)
+            } else {
+                installation::link_tree(&entry.path(), &to)
+            }
+        } else if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            // A link shares the base's permissions; a copy gets them in `link_or_copy`.
+            links::link_or_copy(&entry.path(), &to).map(|_| ())
         } else {
-            // A clone is a new file: sunrise-ctl and sunrise-server keep their permissions.
             crate::preparer::clone_or_copy(&entry.path(), &to)
-                .and_then(|()| fs::set_permissions(&to, entry.metadata()?.permissions()))
         };
         copied.map_err(|e| format!("Could not copy {}: {e}", entry.path().display()))?;
     }
@@ -3715,6 +3722,118 @@ mod tests {
             b"prepared"
         );
         for path in [source, client, server] {
+            fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn mutable_in_place_names_the_six_runtime_entries() {
+        use std::ffi::OsStr;
+        for name in [
+            ".local",
+            "resources",
+            ".sunrise-cache",
+            "cache",
+            "logs",
+            "crash-reports",
+        ] {
+            assert!(installation::mutable_in_place(OsStr::new(name)), "{name}");
+        }
+        for name in ["sunrise-ctl", "native-data", "tools"] {
+            assert!(!installation::mutable_in_place(OsStr::new(name)), "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_base_links_immutable_files_and_copies_mutable_ones() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let base = dir("link-base");
+        let out = dir("link-out");
+        for (path, bytes) in [
+            ("sunrise-ctl", "control"),
+            ("sunrise-release.json", "{}"),
+            ("tools/a.bin", "tool"),
+            ("logs/latest.log", "log"),
+            ("cache/x", "cache"),
+            (".local/sunrise-client/26.3/data", "prepared"),
+        ] {
+            let file = base.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, bytes).unwrap();
+        }
+        fs::set_permissions(base.join("sunrise-ctl"), fs::Permissions::from_mode(0o755)).unwrap();
+        copy_base(&base, &out, Target::Server, false).unwrap();
+        let inode = |root: &Path, path: &str| fs::metadata(root.join(path)).unwrap().ino();
+        for path in ["sunrise-ctl", "sunrise-release.json", "tools/a.bin"] {
+            assert_eq!(inode(&base, path), inode(&out, path), "{path}");
+        }
+        for path in ["logs/latest.log", "cache/x", ".local/sunrise-client/26.3/data"] {
+            assert_ne!(inode(&base, path), inode(&out, path), "{path}");
+            assert_eq!(fs::read(base.join(path)).unwrap(), fs::read(out.join(path)).unwrap());
+        }
+        let mode = fs::metadata(out.join("sunrise-ctl")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0o111);
+        let mut log = fs::OpenOptions::new()
+            .append(true)
+            .open(out.join("logs/latest.log"))
+            .unwrap();
+        log.write_all(b" more").unwrap();
+        assert_eq!(fs::read(base.join("logs/latest.log")).unwrap(), b"log");
+        for path in [base, out] {
+            fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_output_named_like_a_carried_file_leaves_the_base_untouched() {
+        for shared in [false, true] {
+            let base = dir("write-through-base");
+            let out = dir("write-through-out");
+            let source = dir("write-through-source").join("libshared.so");
+            fs::write(base.join("libshared.so"), b"base").unwrap();
+            fs::write(&source, b"built").unwrap();
+            copy_base(&base, &out, Target::Server, false).unwrap();
+            let library = workspace::Library {
+                name: "libshared.so".to_owned(),
+                sha256: sunrise_launcher_smod::index::sha256_file(&source).unwrap(),
+                source: source.clone(),
+                shared,
+            };
+            library.copy_into(&out).unwrap();
+            assert_eq!(fs::read(base.join("libshared.so")).unwrap(), b"base");
+            assert_eq!(fs::read(out.join("libshared.so")).unwrap(), b"built");
+            for path in [base, out, source.parent().unwrap().to_owned()] {
+                fs::remove_dir_all(path).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_shared_library_is_linked_and_still_hashed() {
+        let from = dir("shared-library-from");
+        let to = dir("shared-library-to");
+        let source = from.join("libshared.so");
+        fs::write(&source, b"runtime").unwrap();
+        let mut library = workspace::Library {
+            name: "libshared.so".to_owned(),
+            sha256: sunrise_launcher_smod::index::sha256_file(&source).unwrap(),
+            source: source.clone(),
+            shared: true,
+        };
+        library.copy_into(&to).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                fs::metadata(&source).unwrap().ino(),
+                fs::metadata(to.join("libshared.so")).unwrap().ino()
+            );
+        }
+        library.sha256 = "0".repeat(64);
+        let error = library.copy_into(&to).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        for path in [from, to] {
             fs::remove_dir_all(path).unwrap();
         }
     }
