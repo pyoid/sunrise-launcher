@@ -32,6 +32,8 @@ fn fake(dir: &Path, events: &[&str]) -> std::process::Command {
 #[test]
 #[ignore = "daily"]
 fn a_tool_run_reports_its_mods_answers_its_crates_question_and_ends_built_or_blamed() {
+    // `run` writes the tool's start-up line into the shared build log.
+    let _guard = super::super::tests::scratch_state();
     let dir = std::env::temp_dir().join(format!("sunrise-native-tool-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let started = RefCell::new(Vec::new());
@@ -121,6 +123,8 @@ fn a_tool_run_reports_its_mods_answers_its_crates_question_and_ends_built_or_bla
 #[cfg(unix)]
 #[test]
 fn published_sdk_reply_names_the_archive_id_not_the_cargo_package() {
+    // `run` writes the tool's start-up line into the shared build log.
+    let _guard = super::super::tests::scratch_state();
     use super::super::{registry_failure, ConflictRequirement, Failed, RegistryConflict};
     let dir = tempfile::tempdir().unwrap();
     let reply =
@@ -156,6 +160,8 @@ fn published_sdk_reply_names_the_archive_id_not_the_cargo_package() {
 #[cfg(unix)]
 #[test]
 fn resolver_failure_uses_cargos_requiring_chains_not_the_mods_lock_versions() {
+    // `run` writes the tool's start-up line into the shared build log.
+    let _guard = super::super::tests::scratch_state();
     use super::super::{registry_failure, ConflictRequirement, Failed, RegistryConflict};
     let dir = tempfile::tempdir().unwrap();
     let details = include_str!("../../tests/fixtures/native-registry-conflicts.txt");
@@ -264,7 +270,7 @@ fn not_starting_a_worker_does_not_retain_its_staged_directory() {
         ),
         (fake(dir.path(), &[]), &stopped, super::super::CANCELLED),
     ] {
-        let mut workspace = Workspace::new(dir.path()).unwrap();
+        let mut workspace = Workspace::scratch(dir.path(), "scratch");
         let path = workspace.path().to_owned();
         std::fs::write(path.join("staged-sdk"), b"private").unwrap();
         let failure = run(
@@ -278,7 +284,8 @@ fn not_starting_a_worker_does_not_retain_its_staged_directory() {
         .unwrap_err();
         assert!(failure.error.contains(expected), "{}", failure.error);
         drop(workspace);
-        assert!(!path.exists());
+        // Nothing started, so the folder stays for the next build, with no worker to prove gone.
+        assert!(path.join("staged-sdk").exists() && !path.join(".worker").exists());
         assert!(!dir.path().join("plan").exists());
     }
 }
@@ -286,6 +293,8 @@ fn not_starting_a_worker_does_not_retain_its_staged_directory() {
 #[test]
 #[cfg(target_os = "linux")]
 fn an_sdk_exit_or_stop_finishes_even_while_a_descendant_keeps_both_pipes_open() {
+    // `run` writes the tool's start-up line into the shared build log.
+    let _guard = super::super::tests::scratch_state();
     for case in ["exit", "stop", "check"] {
         let scratch = tempfile::tempdir().unwrap();
         let path = scratch.path().to_owned();
@@ -305,7 +314,7 @@ case "$2" in
 esac
 exit 125
 "#, "sdk"]).arg(&actor).arg(case);
-            let mut workspace = Workspace::new(&actor).unwrap();
+            let mut workspace = Workspace::scratch(&actor, "scratch");
             let workspace_path = workspace.path().to_owned();
             let error = if case == "check" {
                 ask(command, "native-check", &serde_json::json!({}), &active).unwrap_err()
@@ -360,6 +369,8 @@ exit 125
 #[test]
 #[cfg(unix)]
 fn the_runner_refuses_duplicate_terminal_events_and_wrong_or_extra_check_replies() {
+    // `run` writes the tool's start-up line into the shared build log.
+    let _guard = super::super::tests::scratch_state();
     let dir = tempfile::tempdir().unwrap();
     let good = r#"{"contract":2,"route":null,"mods":[]}"#;
     let refusal = r#"{"contract":2,"error":{"kind":"unread","message":"fixture refused"}}"#;
@@ -388,7 +399,9 @@ fn the_runner_refuses_duplicate_terminal_events_and_wrong_or_extra_check_replies
             .contains("incomplete or inconsistent"));
     }
     assert!(ask_sdk(&["EXIT2"]).unwrap_err().contains("didn't accept"));
-    assert!(ask_sdk(&["EXIT3"]).unwrap_err().contains("too old"));
+    assert!(ask_sdk(&["EXIT3"])
+        .unwrap_err()
+        .contains("different contracts"));
     let built = r#"{"event":"built","route":"prebuilt","binary":"/b/game","libraries":[],"records":[],"mods":[],"internals":{},"mixins":"x","used":[]}"#;
     let failed = r#"{"event":"failed","error":"another ending","blame":null,"used":[]}"#;
     let result = run(
@@ -411,6 +424,8 @@ fn the_runner_refuses_duplicate_terminal_events_and_wrong_or_extra_check_replies
 #[cfg(unix)]
 #[ignore = "daily"]
 fn leader_success_or_blamed_failure_is_not_a_compiler_handoff() {
+    // `run` writes the tool's start-up line into the shared build log.
+    let _guard = super::super::tests::scratch_state();
     let dir = tempfile::tempdir().unwrap();
     let built = r#"{"event":"built","route":"prebuilt","binary":"/b/game","libraries":[],"records":[],"mods":[],"internals":{},"mixins":"x","used":[]}"#;
     let failed = r#"{"event":"failed","error":"compile error","blame":{"mod":"greeter","kind":"compile"},"used":[]}"#;
@@ -519,14 +534,14 @@ printf '%s\n' '{"event":"built","route":"prebuilt-api","binary":"unused","librar
         )
     };
     let stop = Cancellation::default();
-    let mut first = Workspace::new(root.path()).unwrap();
+    let mut first = Workspace::scratch(root.path(), "first");
     let old = first.path().to_owned();
     let error = build_fixture(&detached, &mut first, &stop, &|_, _, _| stop.stop()).unwrap_err();
     assert_eq!(error.error, super::super::CANCELLED);
     drop(first);
     assert!(old.join("tmp/holding").exists() && !old.join("tmp/finished").exists());
 
-    let mut retry = Workspace::new(root.path()).unwrap();
+    let mut retry = Workspace::scratch(root.path(), "retry");
     let fresh = Cancellation::default();
     let result = build_fixture(&succeeds, &mut retry, &fresh, &|_, _, _| unreachable!());
     assert_eq!(result.unwrap().route, CheckRoute::PrebuiltApi);
@@ -561,15 +576,15 @@ printf '%s\n' '{"event":"built","route":"prebuilt-api","binary":"unused","librar
         !stage_root.exists(),
         "only reclaim after the real staged writer exits"
     );
-    let clean = retry.path().to_owned();
+    let proved = retry.path().to_owned();
     drop(retry);
-    assert!(!clean.exists());
+    assert!(proved.exists() && !proved.join(".worker").exists());
 }
 
 #[test]
 fn build_plan_and_process_use_the_same_private_cargo_home() {
     let dir = tempfile::tempdir().unwrap();
-    let mut workspace = Workspace::new(dir.path()).unwrap();
+    let mut workspace = Workspace::scratch(dir.path(), "scratch");
     let path = workspace.path().to_owned();
     let rust = Toolchain {
         dir: path.join("rust"),
@@ -796,5 +811,82 @@ fn a_one_line_command_gets_its_name_and_a_contract_and_answers_one_line() {
         (plan["contract"].as_u64(), plan["update"].as_bool()),
         (Some(2), Some(true))
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_tool_on_a_newer_contract_is_told_to_update_the_launcher() {
+    let said = ended(Some(3), Some(CONTRACT + 1));
+    assert!(
+        said.contains("too old for this SDK's native build tool"),
+        "{said}"
+    );
+    assert!(said.contains("update the launcher"), "{said}");
+}
+
+#[test]
+fn a_tool_on_an_older_contract_is_told_to_be_replaced_not_the_launcher() {
+    let said = ended(Some(3), Some(CONTRACT - 1));
+    assert!(said.contains("tool is too old for this launcher"), "{said}");
+    assert!(!said.contains("update the launcher"), "{said}");
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "daily"]
+fn a_check_whose_reply_names_an_older_contract_says_the_tool_is_old() {
+    let _guard = super::super::tests::scratch_state();
+    let dir =
+        std::env::temp_dir().join(format!("sunrise-native-check-older-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    fake(&dir, &[r#"{"contract":1}"#, "EXIT3"]);
+    let plan = serde_json::json!({"contract": CONTRACT});
+    let failure = check(&dir.join("tool"), &plan, &Cancellation::default(), None).unwrap_err();
+    assert!(
+        matches!(&failure, CheckFailure::Refused(text) if text.contains("tool is too old for this launcher")),
+        "{failure:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "daily"]
+fn the_tool_start_time_is_the_first_message() {
+    use std::os::unix::fs::PermissionsExt;
+    let _guard = super::super::tests::scratch_state();
+    let dir =
+        std::env::temp_dir().join(format!("sunrise-native-tool-start-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let program = dir.join("tool");
+    std::fs::write(
+        &program,
+        "#!/bin/sh\nread plan\nsleep 0.2\necho '{\"event\":\"mod\",\"id\":\"greeter\",\"done\":1,\"total\":1}'\nexit 2\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    super::super::clear_log().unwrap();
+    let _ = run(
+        std::process::Command::new(program),
+        "{}",
+        &|_, _, _| {},
+        &Cancellation::default(),
+        None,
+        None,
+    );
+    let log = std::fs::read_to_string(super::super::log_path()).unwrap();
+    let line = log
+        .lines()
+        .find(|line| line.starts_with("SDK tool first message after "))
+        .expect(&log);
+    let ms: u128 = line
+        .trim_start_matches("SDK tool first message after ")
+        .split(' ')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(ms >= 200, "{line}");
     let _ = std::fs::remove_dir_all(&dir);
 }

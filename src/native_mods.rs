@@ -14,6 +14,7 @@ use sunrise_launcher_smod::dependencies;
 
 mod build_log;
 mod bundle;
+mod stages;
 use build_log::log_warning;
 pub(crate) use build_log::root;
 pub use build_log::{
@@ -42,6 +43,8 @@ pub mod sdk_cache;
 pub use isolate::{kept as kept_left_out, kept_current, kept_stamp, Detail, LeftOut, Why};
 pub use picker::{Route, Routes};
 pub use tool::Cancellation;
+pub(crate) mod attempt_owner;
+mod links;
 mod workspace;
 pub(crate) use workspace::{ATTEMPT_PREFIX, OLD_ATTEMPT_PREFIX};
 mod uses;
@@ -1487,14 +1490,33 @@ fn build_stages(
     let cancellation = &options.cancellation;
     cancellation.check()?;
     let started = std::time::Instant::now();
+    // The steps around the mods' compile, timed like each command (`run_checked`), so the log
+    // accounts for the whole build. Each line also goes to the Logs panel, and the stage
+    // times are summed up in one line at the end.
+    let timed = |step: &str, took: std::time::Duration| {
+        let line = trf(
+            "{step}: {ms} ms",
+            &[("step", step), ("ms", &took.as_millis().to_string())],
+        );
+        crate::launcher_log::line(&line);
+        append_log(&line).map(|()| took)
+    };
+    let mut stages = stages::Stages::default();
     let built_on = checked_about(base)?;
     backend::need_prepared(base)?;
     let platform = platform_for_game(base)?;
     fs::create_dir_all(root()).map_err(|e| e.to_string())?;
     // The mods are copied first: the build and its key use the copy, whatever happens to the
     // folder meanwhile.
-    let mut workspace = workspace::Workspace::new(&root()).map_err(|e| e.to_string())?;
-    let incoming = workspace.path().join("mods.incoming");
+    let scratch = backend::build_dir().join("tmp");
+    fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
+    // Named as before: a mixin diagnostic's file path is traced to its mod by this folder name.
+    let incoming_dir = tempfile::Builder::new()
+        .prefix("build-")
+        .tempdir_in(&scratch)
+        .map_err(|e| e.to_string())?;
+    let incoming_path = incoming_dir.path().join("mods.incoming");
+    let incoming = incoming_path.as_path();
     let found = scan_bundles(folder)?;
     if found.is_empty() {
         return Err(Failed::Nothing);
@@ -1512,6 +1534,8 @@ fn build_stages(
         .iter()
         .map(|b| (b.manifest.id.clone(), source_digest(b)))
         .collect();
+    stages.reading = Some(timed("Reading the mods", started.elapsed())?);
+    let planning = std::time::Instant::now();
     // The cache identifies every requested input, including a mod left out after a failure:
     // replacing its files must retry it rather than reuse a build that excluded the old copy.
     let requested: Vec<Bundle> = found
@@ -1620,13 +1644,12 @@ fn build_stages(
         mixins::materialize(bundle, &bundle.dir, pin)?;
     }
     let check_inputs = retry_check_inputs(&mods, &mixins_pins, requested.len())?;
-    let check_folder = check_inputs
-        .as_ref()
-        .map_or(incoming.as_path(), |dir| dir.path());
+    let check_folder = check_inputs.as_ref().map_or(incoming, |dir| dir.path());
     let mut fitted: Vec<String> = Vec::new();
     let mut route = None;
     if let Some(sdk) = &sdk {
         progress(Step::Checking(ids.len()));
+        let asking = std::time::Instant::now();
         let checks = check_all(
             check_folder,
             &ids,
@@ -1635,6 +1658,10 @@ fn build_stages(
             cancellation,
             options.staging,
         )?;
+        stages.check = Some(timed(
+            "Asking the SDK tool to check the mods",
+            asking.elapsed(),
+        )?);
         if let Some((id, why)) = checks.refusals.first() {
             return Err(refusal_text(id, why).into());
         }
@@ -1783,24 +1810,13 @@ fn build_stages(
         stage.retain_target(&version)?;
     }
     let exists = target.directory(&version).join(".installed").is_file();
-    // The steps around the mods' compile, timed like each command (`run_checked`), so the log
-    // accounts for the whole build.
-    let timed = |step: &str, since: std::time::Instant| {
-        append_log(&trf(
-            "{step}: {ms} ms",
-            &[
-                ("step", step),
-                ("ms", &since.elapsed().as_millis().to_string()),
-            ],
-        ))
-    };
-    timed("Planning the build", started)?;
+    stages.planning = Some(timed("Planning the build", planning.elapsed())?);
     let fetching = std::time::Instant::now();
     let prebuilt = if exists {
         None
     } else {
         // Checked only for a build that will run: a cached build or no mods never needs the paths.
-        if let Some(length) = workspace::too_deep(workspace.path()).filter(|_| cfg!(windows)) {
+        if let Some(length) = workspace::too_deep(&root()).filter(|_| cfg!(windows)) {
             return Err(trf(
                 "The launcher's folder {folder} is too deep for Windows: a native build there needs paths of {length} characters, and Windows allows 259. Set SUNRISE_LAUNCHER_HOME to a shorter folder.",
                 &[
@@ -1857,6 +1873,7 @@ fn build_stages(
                 let route = match route {
                     Some(route) => route,
                     None => {
+                        let asking = std::time::Instant::now();
                         let checks = check_all(
                             check_folder,
                             &ids,
@@ -1865,6 +1882,9 @@ fn build_stages(
                             cancellation,
                             options.staging,
                         )?;
+                        let asked =
+                            timed("Asking the SDK tool to check the mods", asking.elapsed())?;
+                        stages.check = Some(stages.check.unwrap_or_default() + asked);
                         if let Some((id, why)) = checks.refusals.first() {
                             return Err(refusal_text(id, why).into());
                         }
@@ -1885,7 +1905,7 @@ fn build_stages(
         Some(package)
     };
     if prebuilt.is_some() {
-        timed("Checking the prebuilt game", fetching)?;
+        stages.prebuilt = Some(timed("Checking the prebuilt game", fetching.elapsed())?);
     }
     cancellation.check()?;
     let plan = if exists {
@@ -1955,20 +1975,64 @@ fn build_stages(
                 Failed::Tools(error)
             }
         })?;
-        timed("Checking the Rust toolchain", checking)?;
+        stages.toolchain = Some(timed("Checking the Rust toolchain", checking.elapsed())?);
+        let mixins_from_source = MIXINS_FROM_SOURCE.load(std::sync::atomic::Ordering::Relaxed);
+        // One folder for every build of this game build: its profiles share the compiled files.
+        let (mut workspace, opened) = workspace::Workspace::open(
+            &root(),
+            &workspace::key(&workspace::KeyParts {
+                revision: &revision,
+                signed_sdk: signed_sdk.as_deref().unwrap_or_default(),
+                route: expected_route.map_or("", |route| route.name()),
+                target: target.name(),
+                platform: platform.cache_key().unwrap_or_default(),
+                rust_target: rust.host.target,
+                mixins_from_source,
+            }),
+            cancellation,
+            &|| {
+                let _ = append_log("Waiting for another build of this game version");
+                progress(Step::Waiting)
+            },
+        )?;
+        if let workspace::Opened::SetAside(aside) = &opened {
+            append_log(&format!(
+                "The last build of this game version couldn't prove its workers stopped: its files were set aside in {} and this build starts clean.",
+                aside.display()
+            ))
+            .map_err(Failed::Other)?;
+        }
         progress(Step::PrebuiltMods);
         let compiling = std::time::Instant::now();
         // The tool compiles every mod in the folder it's given: exactly the staged copies of the ones this build keeps.
-        let compiled = workspace.path().join("mods.compile");
+        // The tool names its stage folder after this path, so it is the same for each build of a profile.
+        let compiled = workspace.mods(&backend::plain(
+            instance.canonicalize().map_err(|e| e.to_string())?,
+        ));
+        match fs::remove_dir_all(&compiled) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(error.to_string().into())
+            }
+            _ => {}
+        }
+        let copying = std::time::Instant::now();
         for bundle in &mods {
             copy_bundle(bundle, &compiled.join(&bundle.manifest.id))?;
         }
-        let game = workspace.package(game).map_err(|e| e.to_string())?;
+        let copied = copying.elapsed();
+        let packaging = std::time::Instant::now();
+        let game = workspace
+            .lay_out_package(game, signed_sdk.as_deref(), &|line| {
+                let _ = append_log(line);
+            })
+            .map_err(|e| e.to_string())?;
+        stages.package = Some(timed("Laying out the SDK package", packaging.elapsed())?);
         let work = workspace.work();
         // A package carries the registry lock `cargo sunrise-mod build` wrote; a source folder may
         // have none yet. It gets the lock `native-lock` writes, from this build's tool and with
         // the same kept game lock, which runs none of the mod's code. The author's folder is
         // never written to.
+        let locking = std::time::Instant::now();
         for bundle in &mods {
             let copy = compiled.join(&bundle.manifest.id);
             if !copy.join("Cargo.lock").exists() {
@@ -1983,17 +2047,37 @@ fn build_stages(
                 )?;
             }
         }
+        stages.staging = Some(timed("Staging the mods", copied + locking.elapsed())?);
+        // This folder's own cargo home gets the shared downloads by links; the tool fetches
+        // offline when nothing changed since its last fetch here.
+        let filled = workspace
+            .fill_cargo(
+                &rust_toolchain::cargo_home(),
+                &compiled,
+                signed_sdk.as_deref(),
+            )
+            .map_err(|e| e.to_string())?;
+        append_log(&format!(
+            "Filled this build folder's download cache from the shared one: {} downloads linked, {} files copied (the crates.io index is always copied, as Cargo rewrites it in place). {}",
+            filled.linked,
+            filled.copied,
+            if filled.offline {
+                "The locks and the cache are as the last good fetch here left them: the SDK tool's fetch runs offline."
+            } else {
+                "The locks or the cache changed since the last good fetch here: the SDK tool's fetch goes online."
+            }
+        ))
+        .map_err(Failed::Other)?;
         // The libraries an earlier build of these mods kept (`kept`), copied in so the tool
         // compiles only the mods whose own inputs changed. Without them, every mod compiles.
         let seeding = std::time::Instant::now();
-        let mixins_from_source = MIXINS_FROM_SOURCE.load(std::sync::atomic::Ordering::Relaxed);
         let kept_store = kept::Kept::new(&root());
-        let kept_plan = match (signed_sdk, expected_route) {
-            (Some(sdk), Some(route)) => plan_kept(
+        let kept_plan = match (&sdk, signed_sdk, expected_route) {
+            (Some(full), Some(sdk), Some(route)) => plan_kept(
                 &kept::Build {
                     sdk,
-                    tool: &sunrise_launcher_smod::index::sha256_file(program)
-                        .map_err(Failed::Other)?,
+                    tool: &sdk_cache::tool_identity(full, rust.host.target)
+                        .map_err(|e| Failed::Other(e.to_string()))?,
                     route: route.name(),
                     revision: &revision,
                     mixins: &mixins,
@@ -2020,10 +2104,11 @@ fn build_stages(
                         "Reusing the libraries kept from an earlier build: {mods}",
                         &[("mods", &reused.join(", "))],
                     ),
-                    seeding,
+                    seeding.elapsed(),
                 )?;
             }
         }
+        let running = std::time::Instant::now();
         let built = tool::build(
             &rust,
             program,
@@ -2053,6 +2138,8 @@ fn build_stages(
         // Don't turn a stopped tool into an attributed compile failure.
         cancellation.check()?;
         let built = built.map_err(blame)?;
+        stages.tool = Some(timed("The SDK tool ran for", running.elapsed())?);
+        let verifying = std::time::Instant::now();
         let libraries = workspace
             .verify_outputs(
                 &built,
@@ -2067,6 +2154,15 @@ fn build_stages(
                 tr("The native build tool's output couldn't be verified. See the build log.")
                     .to_owned()
             })?;
+        stages.verify = Some(timed("Verifying the build's outputs", verifying.elapsed())?);
+        match workspace.publish_downloads(&rust_toolchain::cargo_home()) {
+            Ok((published, 0)) => append_log(&format!("Shared {published} downloaded crates.")),
+            Ok((published, left_out)) => append_log(&format!(
+                "Shared {published} downloaded crates; {left_out} that no lock of this build pins stay in this build folder."
+            )),
+            Err(error) => append_log(&format!("The downloaded crates couldn't be shared: {error}")),
+        }
+        .map_err(Failed::Other)?;
         append_log(&trf(
             "Native mods route: {route}.",
             &[("route", built.route.name())],
@@ -2094,7 +2190,7 @@ fn build_stages(
             &ordered,
             cancellation,
         )?;
-        timed("Installing the build", installing)?;
+        stages.install = Some(timed("Installing the build", installing.elapsed())?);
         // Kept only once the build they verified is installed, and only while the attempt
         // hasn't been stopped: a stopped build keeps nothing. A failure here costs only the
         // next build's time.
@@ -2102,7 +2198,12 @@ fn build_stages(
             let keeping = std::time::Instant::now();
             match kept_store.save(&work, &built, &libraries, &plan.mods, &plan.keys) {
                 Ok(0) => {}
-                Ok(_) => timed("Keeping the mods' libraries for the next build", keeping)?,
+                Ok(_) => {
+                    timed(
+                        "Keeping the mods' libraries for the next build",
+                        keeping.elapsed(),
+                    )?;
+                }
                 Err(error) => log_warning(&trf(
                     "The mods' libraries couldn't be kept for the next build: {error}",
                     &[("error", &error.to_string())],
@@ -2113,6 +2214,10 @@ fn build_stages(
         // Used again: it counts as the newest of the builds kept (`prune`).
         let _ = fs::write(target.directory(&version).join(".installed"), "");
     }
+    timed("Native build total", started.elapsed())?;
+    let summary = stages.summary();
+    crate::launcher_log::line(&summary);
+    append_log(&summary)?;
     built.secs = started.elapsed().as_secs();
     Ok(built)
 }
@@ -2664,7 +2769,9 @@ mod installation;
 use installation::install;
 
 /// Copies version folder `from` into `to` but for what a new build of `target` makes its own
-/// ([`carried_over`]), cloned where the disk can. Also an imported build's start (`build_import`).
+/// ([`carried_over`]). Files no one rewrites after an install are hard links to the base's (a copy
+/// where the filesystem can't link); the folders the game rewrites ([`installation::mutable_in_place`])
+/// are cloned or copied. Also an imported build's start (`build_import`).
 pub(crate) fn copy_base(
     from: &Path,
     to: &Path,
@@ -2678,11 +2785,16 @@ pub(crate) fn copy_base(
         }
         let to = to.join(&name);
         let copied = if entry.path().is_dir() {
-            backend::copy_dir(&entry.path(), &to)
+            if installation::mutable_in_place(&name) {
+                backend::copy_dir(&entry.path(), &to)
+            } else {
+                installation::link_tree(&entry.path(), &to)
+            }
+        } else if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            // A link shares the base's permissions; a copy gets them in `link_or_copy`.
+            links::link_or_copy(&entry.path(), &to).map(|_| ())
         } else {
-            // A clone is a new file: sunrise-ctl and sunrise-server keep their permissions.
             crate::preparer::clone_or_copy(&entry.path(), &to)
-                .and_then(|()| fs::set_permissions(&to, entry.metadata()?.permissions()))
         };
         copied.map_err(|e| format!("Could not copy {}: {e}", entry.path().display()))?;
     }
@@ -3715,6 +3827,128 @@ mod tests {
             b"prepared"
         );
         for path in [source, client, server] {
+            fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn mutable_in_place_names_the_six_runtime_entries() {
+        use std::ffi::OsStr;
+        for name in [
+            ".local",
+            "resources",
+            ".sunrise-cache",
+            "cache",
+            "logs",
+            "crash-reports",
+        ] {
+            assert!(installation::mutable_in_place(OsStr::new(name)), "{name}");
+        }
+        for name in ["sunrise-ctl", "native-data", "tools"] {
+            assert!(!installation::mutable_in_place(OsStr::new(name)), "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_base_links_immutable_files_and_copies_mutable_ones() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let base = dir("link-base");
+        let out = dir("link-out");
+        for (path, bytes) in [
+            ("sunrise-ctl", "control"),
+            ("sunrise-release.json", "{}"),
+            ("tools/a.bin", "tool"),
+            ("logs/latest.log", "log"),
+            ("cache/x", "cache"),
+            (".local/sunrise-client/26.3/data", "prepared"),
+        ] {
+            let file = base.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, bytes).unwrap();
+        }
+        fs::set_permissions(base.join("sunrise-ctl"), fs::Permissions::from_mode(0o755)).unwrap();
+        copy_base(&base, &out, Target::Server, false).unwrap();
+        let inode = |root: &Path, path: &str| fs::metadata(root.join(path)).unwrap().ino();
+        for path in ["sunrise-ctl", "sunrise-release.json", "tools/a.bin"] {
+            assert_eq!(inode(&base, path), inode(&out, path), "{path}");
+        }
+        for path in [
+            "logs/latest.log",
+            "cache/x",
+            ".local/sunrise-client/26.3/data",
+        ] {
+            assert_ne!(inode(&base, path), inode(&out, path), "{path}");
+            assert_eq!(
+                fs::read(base.join(path)).unwrap(),
+                fs::read(out.join(path)).unwrap()
+            );
+        }
+        let mode = fs::metadata(out.join("sunrise-ctl"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111);
+        let mut log = fs::OpenOptions::new()
+            .append(true)
+            .open(out.join("logs/latest.log"))
+            .unwrap();
+        log.write_all(b" more").unwrap();
+        assert_eq!(fs::read(base.join("logs/latest.log")).unwrap(), b"log");
+        for path in [base, out] {
+            fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_output_named_like_a_carried_file_leaves_the_base_untouched() {
+        for shared in [false, true] {
+            let base = dir("write-through-base");
+            let out = dir("write-through-out");
+            let source = dir("write-through-source").join("libshared.so");
+            fs::write(base.join("libshared.so"), b"base").unwrap();
+            fs::write(&source, b"built").unwrap();
+            copy_base(&base, &out, Target::Server, false).unwrap();
+            let library = workspace::Library {
+                name: "libshared.so".to_owned(),
+                sha256: sunrise_launcher_smod::index::sha256_file(&source).unwrap(),
+                source: source.clone(),
+                shared,
+            };
+            library.copy_into(&out).unwrap();
+            assert_eq!(fs::read(base.join("libshared.so")).unwrap(), b"base");
+            assert_eq!(fs::read(out.join("libshared.so")).unwrap(), b"built");
+            for path in [base, out, source.parent().unwrap().to_owned()] {
+                fs::remove_dir_all(path).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_shared_library_is_linked_and_still_hashed() {
+        let from = dir("shared-library-from");
+        let to = dir("shared-library-to");
+        let source = from.join("libshared.so");
+        fs::write(&source, b"runtime").unwrap();
+        let mut library = workspace::Library {
+            name: "libshared.so".to_owned(),
+            sha256: sunrise_launcher_smod::index::sha256_file(&source).unwrap(),
+            source: source.clone(),
+            shared: true,
+        };
+        library.copy_into(&to).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                fs::metadata(&source).unwrap().ino(),
+                fs::metadata(to.join("libshared.so")).unwrap().ino()
+            );
+        }
+        library.sha256 = "0".repeat(64);
+        let error = library.copy_into(&to).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        for path in [from, to] {
             fs::remove_dir_all(path).unwrap();
         }
     }

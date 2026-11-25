@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod attempts;
 pub mod eviction;
 mod inventory;
 pub mod policy;
@@ -94,6 +95,8 @@ pub enum BuildCache {
     Source,
     Tools,
     PrebuiltOutput,
+    /// One kept build folder per game build (`native_mods::workspace`).
+    KeptBuilds,
     InternalsSync,
     Prebuilt,
     ServerBuilds,
@@ -110,6 +113,7 @@ impl BuildCache {
             Self::Source => "native/source",
             Self::Tools => "native/tools",
             Self::PrebuiltOutput => "native/prebuilt-build",
+            Self::KeptBuilds => "native/k",
             Self::InternalsSync => "native/internals-sync",
             Self::Prebuilt => "native/prebuilt",
             Self::ServerBuilds => "native/server-builds",
@@ -122,8 +126,11 @@ impl BuildCache {
 
     fn access(self, path: &Path) -> Result<Access, Error> {
         match self {
-            // No game runs from kept mod libraries: a build copies them into its workspace.
-            Self::KeptMods | Self::Rust | Self::Cargo | Self::Scratch => Ok(Access::BuildTools),
+            // No game runs from kept mod libraries or kept build folders: a build copies its
+            // libraries out of them into the game build it installs.
+            Self::KeptMods | Self::KeptBuilds | Self::Rust | Self::Cargo | Self::Scratch => {
+                Ok(Access::BuildTools)
+            }
             _ => Access::for_unit(path),
         }
     }
