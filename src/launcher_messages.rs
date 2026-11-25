@@ -576,6 +576,7 @@ impl Launcher {
                     }
                 }
                 Msg::ClientObservationLost(error) => {
+                    self.game_stop_pressed = false;
                     self.cancel_launcher_restart();
                     self.client = None;
                     self.client_run = None;
@@ -623,6 +624,7 @@ impl Launcher {
                         }
                         Job::Client => {
                             self.client = None;
+                            let stopped = std::mem::take(&mut self.game_stop_pressed);
                             self.refresh_open_storage_builds();
                             // Any session file the game didn't read (it crashed first).
                             account::discard_unread_sessions();
@@ -715,6 +717,13 @@ impl Launcher {
                                     None => summary,
                                 };
                                 self.crash = Some(Crash { summary });
+                                if logs_panel::crash_opens_logs(
+                                    error.is_some(),
+                                    report.is_some(),
+                                    stopped,
+                                ) {
+                                    self.show_crash_log();
+                                }
                             }
                         }
                         Job::Server => {}

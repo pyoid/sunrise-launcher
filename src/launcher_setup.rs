@@ -168,6 +168,7 @@ impl Launcher {
             client_started: None,
             client_home: None,
             crash: None,
+            game_stop_pressed: false,
             servers: servers_page::Servers::new(),
             internet: internet::Internet::new(),
             root_focus: cx.focus_handle(),
