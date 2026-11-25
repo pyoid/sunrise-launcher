@@ -2025,6 +2025,26 @@ fn build_stages(
                 )?;
             }
         }
+        // This folder's own cargo home gets the shared downloads by links; the tool fetches
+        // offline when nothing changed since its last fetch here.
+        let filled = workspace
+            .fill_cargo(
+                &rust_toolchain::cargo_home(),
+                &compiled,
+                signed_sdk.as_deref(),
+            )
+            .map_err(|e| e.to_string())?;
+        append_log(&format!(
+            "Filled the download cache: {} crates linked, {} copied. {}",
+            filled.linked,
+            filled.copied,
+            if filled.offline {
+                "The lock is as the last fetch left it: no fetch."
+            } else {
+                "The lock or the cache changed: fetching."
+            }
+        ))
+        .map_err(Failed::Other)?;
         // The libraries an earlier build of these mods kept (`kept`), copied in so the tool
         // compiles only the mods whose own inputs changed. Without them, every mod compiles.
         let seeding = std::time::Instant::now();
@@ -2108,6 +2128,14 @@ fn build_stages(
                 tr("The native build tool's output couldn't be verified. See the build log.")
                     .to_owned()
             })?;
+        match workspace.publish_downloads(&rust_toolchain::cargo_home()) {
+            Ok((published, 0)) => append_log(&format!("Shared {published} downloaded crates.")),
+            Ok((published, left_out)) => append_log(&format!(
+                "Shared {published} downloaded crates; {left_out} that no lock of this build pins stay in this build folder."
+            )),
+            Err(error) => append_log(&format!("The downloaded crates couldn't be shared: {error}")),
+        }
+        .map_err(Failed::Other)?;
         append_log(&trf(
             "Native mods route: {route}.",
             &[("route", built.route.name())],
