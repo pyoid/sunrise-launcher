@@ -363,16 +363,37 @@ pub(super) fn copy_face(id: &'static str, label: &str, shown: Option<usize>) -> 
 /// `label` again.
 pub(super) fn copy_button(id: &'static str, label: &str, text: String) -> Stateful<Div> {
     let key = copy_key(id, &text);
+    copy_keyed(id, label, key, move |_| text.clone())
+}
+
+/// [`copy_button`] for a text too long to hash on every frame: the copy is remembered with
+/// `version` (a length, a revision) instead, and `text` builds what to copy only on a click.
+pub(super) fn copy_button_with(
+    id: &'static str,
+    label: &str,
+    version: impl std::hash::Hash,
+    text: impl Fn(&mut gpui::App) -> String + 'static,
+) -> Stateful<Div> {
+    copy_keyed(id, label, copy_key(id, version), text)
+}
+
+fn copy_keyed(
+    id: &'static str,
+    label: &str,
+    key: SharedString,
+    text: impl Fn(&mut gpui::App) -> String + 'static,
+) -> Stateful<Div> {
     copy_face(id, label, crate::code_box::copied(&key)).on_click(move |_, window, cx| {
-        crate::widgets::copy_quietly(cx, gpui::ClipboardItem::new_string(text.clone()));
+        let item = gpui::ClipboardItem::new_string(text(cx));
+        crate::widgets::copy_quietly(cx, item);
         crate::code_box::note_copy(key.clone(), window, cx);
     })
 }
 
-fn copy_key(id: &str, text: &str) -> SharedString {
-    use std::hash::{Hash as _, Hasher as _};
+fn copy_key(id: &str, version: impl std::hash::Hash) -> SharedString {
+    use std::hash::Hasher as _;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut hasher);
+    version.hash(&mut hasher);
     format!("{id}:{:016x}", hasher.finish()).into()
 }
 

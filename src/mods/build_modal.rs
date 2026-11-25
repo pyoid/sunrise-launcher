@@ -276,28 +276,26 @@ impl Launcher {
         };
         let copy = diagnostic.map(|diagnostic| {
             let diagnostic = diagnostic.to_owned();
-            let copy_id: SharedString = if run.log_open {
+            let copy_id = if run.log_open {
                 "copy-build-log"
             } else {
                 "copy-build-error"
-            }
-            .into();
-            button(
-                copy_id.clone(),
-                if crate::code_box::copied(&copy_id).is_some() {
-                    tr("Copied")
-                } else if run.log_open {
+            };
+            crate::frame::copy_face(
+                copy_id,
+                if run.log_open {
                     tr("Copy")
                 } else {
                     tr("Copy error")
                 },
+                crate::code_box::copied(&copy_id.into()),
             )
             .on_click(move |_, window, cx| {
                 crate::widgets::copy_quietly(
                     cx,
                     gpui::ClipboardItem::new_string(diagnostic.clone()),
                 );
-                crate::code_box::note_copy(copy_id.clone(), window, cx);
+                crate::code_box::note_copy(copy_id.into(), window, cx);
             })
         });
         let foot = if running {

@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::paint::palette;
-use gpui::{rgb, ClipboardItem, ScrollHandle, StyledText};
+use gpui::{rgb, ScrollHandle, StyledText};
 use sunrise_launcher::launcher_log;
 
 /// The launcher lines kept, as many as the log's own ring.
@@ -15,7 +15,7 @@ const KEEP: usize = 5000;
 const HEIGHT: f32 = 0.45;
 
 /// What the panel lists.
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Clone, Copy, Default, PartialEq, Hash)]
 enum Tab {
     #[default]
     Launcher,
@@ -207,6 +207,9 @@ impl Launcher {
                     cx.notify();
                 }))
         };
+        // Copy all builds the text only when pressed; the copy is remembered with the lines'
+        // revision, so a new line puts the button back to Copy all.
+        let launcher = cx.entity();
         let folder = launcher_log::dir().map(|dir| {
             crate::frame::button("logs-folder", tr("Open logs folder"))
                 .on_click(cx.listener(move |_, _, _, cx| crate::glass_toast::open(cx, &dir)))
@@ -225,14 +228,12 @@ impl Launcher {
             ))
             .child(tab_button("logs-tab-game", tr("Game"), Tab::Game, cx))
             .child(div().flex_1())
-            .child(
-                crate::frame::button("logs-copy", tr("Copy all")).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(this.logs_text()));
-                        crate::glass_toast::say(tr("Copied the log"));
-                    },
-                )),
-            )
+            .child(crate::frame::copy_button_with(
+                "logs-copy",
+                tr("Copy all"),
+                (tab, stamp),
+                move |cx| launcher.read(cx).logs_text(),
+            ))
             .child(
                 crate::frame::button("logs-save", tr("Save to file"))
                     .on_click(cx.listener(|this, _, _, cx| this.save_logs(cx))),
