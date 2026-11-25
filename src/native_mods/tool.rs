@@ -347,7 +347,7 @@ fn run(
         .stdout(Stdio::piped());
     let (mut child, errors) = start(command, cancellation, true, profile)?;
     if let Some(workspace) = workspace.as_deref_mut() {
-        workspace.allow_worker();
+        workspace.allow_worker().map_err(unrun)?;
     }
     let result = talk(&mut child, plan, on_mod, cancellation);
     if result.is_err() && cancellation.state().tool.take().is_some() {
@@ -373,7 +373,7 @@ fn run(
         #[cfg(not(target_os = "linux"))]
         let never_started = false;
         if quiescent || never_started {
-            workspace.worker_finished();
+            workspace.worker_finished().map_err(unrun)?;
         }
     }
     if status.is_err() {

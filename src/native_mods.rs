@@ -42,6 +42,8 @@ pub mod sdk_cache;
 pub use isolate::{kept as kept_left_out, kept_current, kept_stamp, Detail, LeftOut, Why};
 pub use picker::{Route, Routes};
 pub use tool::Cancellation;
+mod attempt_owner;
+mod links;
 mod workspace;
 pub(crate) use workspace::{ATTEMPT_PREFIX, OLD_ATTEMPT_PREFIX};
 mod uses;
@@ -1493,8 +1495,15 @@ fn build_stages(
     fs::create_dir_all(root()).map_err(|e| e.to_string())?;
     // The mods are copied first: the build and its key use the copy, whatever happens to the
     // folder meanwhile.
-    let mut workspace = workspace::Workspace::new(&root()).map_err(|e| e.to_string())?;
-    let incoming = workspace.path().join("mods.incoming");
+    let scratch = backend::build_dir().join("tmp");
+    fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
+    // Named as before: a mixin diagnostic's file path is traced to its mod by this folder name.
+    let incoming_dir = tempfile::Builder::new()
+        .prefix("build-")
+        .tempdir_in(&scratch)
+        .map_err(|e| e.to_string())?;
+    let incoming_path = incoming_dir.path().join("mods.incoming");
+    let incoming = incoming_path.as_path();
     let found = scan_bundles(folder)?;
     if found.is_empty() {
         return Err(Failed::Nothing);
@@ -1620,9 +1629,7 @@ fn build_stages(
         mixins::materialize(bundle, &bundle.dir, pin)?;
     }
     let check_inputs = retry_check_inputs(&mods, &mixins_pins, requested.len())?;
-    let check_folder = check_inputs
-        .as_ref()
-        .map_or(incoming.as_path(), |dir| dir.path());
+    let check_folder = check_inputs.as_ref().map_or(incoming, |dir| dir.path());
     let mut fitted: Vec<String> = Vec::new();
     let mut route = None;
     if let Some(sdk) = &sdk {
@@ -1800,7 +1807,7 @@ fn build_stages(
         None
     } else {
         // Checked only for a build that will run: a cached build or no mods never needs the paths.
-        if let Some(length) = workspace::too_deep(workspace.path()).filter(|_| cfg!(windows)) {
+        if let Some(length) = workspace::too_deep(&root()).filter(|_| cfg!(windows)) {
             return Err(trf(
                 "The launcher's folder {folder} is too deep for Windows: a native build there needs paths of {length} characters, and Windows allows 259. Set SUNRISE_LAUNCHER_HOME to a shorter folder.",
                 &[
@@ -1956,10 +1963,45 @@ fn build_stages(
             }
         })?;
         timed("Checking the Rust toolchain", checking)?;
+        let mixins_from_source = MIXINS_FROM_SOURCE.load(std::sync::atomic::Ordering::Relaxed);
+        // One folder for every build of this game build: its profiles share the compiled files.
+        let (mut workspace, opened) = workspace::Workspace::open(
+            &root(),
+            &workspace::key(&workspace::KeyParts {
+                revision: &revision,
+                signed_sdk: signed_sdk.as_deref().unwrap_or_default(),
+                route: expected_route.map_or("", |route| route.name()),
+                target: target.name(),
+                platform: platform.cache_key().unwrap_or_default(),
+                rust_target: rust.host.target,
+                mixins_from_source,
+            }),
+            cancellation,
+            &|| {
+                let _ = append_log("Waiting for another build of this game version");
+                progress(Step::Waiting)
+            },
+        )?;
+        if let workspace::Opened::SetAside(aside) = &opened {
+            append_log(&format!(
+                "The last build of this game version couldn't prove its workers stopped: its files were set aside in {} and this build starts clean.",
+                aside.display()
+            ))
+            .map_err(Failed::Other)?;
+        }
         progress(Step::PrebuiltMods);
         let compiling = std::time::Instant::now();
         // The tool compiles every mod in the folder it's given: exactly the staged copies of the ones this build keeps.
-        let compiled = workspace.path().join("mods.compile");
+        // The tool names its stage folder after this path, so it is the same for each build of a profile.
+        let compiled = workspace.mods(&backend::plain(
+            instance.canonicalize().map_err(|e| e.to_string())?,
+        ));
+        match fs::remove_dir_all(&compiled) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(error.to_string().into())
+            }
+            _ => {}
+        }
         for bundle in &mods {
             copy_bundle(bundle, &compiled.join(&bundle.manifest.id))?;
         }
@@ -1986,7 +2028,6 @@ fn build_stages(
         // The libraries an earlier build of these mods kept (`kept`), copied in so the tool
         // compiles only the mods whose own inputs changed. Without them, every mod compiles.
         let seeding = std::time::Instant::now();
-        let mixins_from_source = MIXINS_FROM_SOURCE.load(std::sync::atomic::Ordering::Relaxed);
         let kept_store = kept::Kept::new(&root());
         let kept_plan = match (signed_sdk, expected_route) {
             (Some(sdk), Some(route)) => plan_kept(
