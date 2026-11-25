@@ -48,6 +48,7 @@ SAME_BYTES = (
     ("crates/sunrise-attestation/tests/verify.rs", "crates/attestation/tests/verify.rs"),
     ("crates/sunrise-attestation/tests/fixtures", "crates/attestation/tests/fixtures"),
     ("crates/sunrise-jar-fetch/src/lib.rs", "crates/jar-fetch/src/lib.rs"),
+    ("crates/sunrise-mod-package/src/library_identity.rs", "crates/smod/src/index/library_identity.rs"),
 )
 
 # (the game's source, the launcher's copy, the edits that turn one into the other): compared as code, ignoring
@@ -269,10 +270,7 @@ SAME_ITEMS = (
         ("pub dependencies: BTreeMap<", "pub dependencies: std::collections::BTreeMap<"),
         ("pub incompatible: BTreeMap<", "pub incompatible: std::collections::BTreeMap<"),
         ("pub discouraged: BTreeMap<", "pub discouraged: std::collections::BTreeMap<"),
-    ), ("pub const API", "fn api", "pub struct Manifest", "pub struct Native", "pub enum Capability")),
-    ("crates/sunrise-mod-package/src/index/registry/builds.rs", "crates/smod/src/index/library_identity.rs", (), (
-        "pub struct LibraryIdentity", "impl<'a> LibraryIdentity", "pub fn library_identity",
-    )),
+    ), ("pub const API", "fn api", "pub struct Manifest", "pub enum Capability")),
 )
 
 
