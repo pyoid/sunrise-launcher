@@ -506,6 +506,7 @@ impl Launcher {
     pub(crate) fn press_play(&mut self) {
         if let Some(client) = &self.client {
             client.kill();
+            self.game_stop_pressed = true;
         } else {
             self.play_game(crate::launcher_play::PlayDestination::Home);
         }
@@ -531,6 +532,7 @@ impl Launcher {
             StripAct::StopGame => {
                 if let Some(client) = &self.client {
                     client.kill();
+                    self.game_stop_pressed = true;
                 }
             }
             StripAct::StopInstall => self.stop_registry_install(),

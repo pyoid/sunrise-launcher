@@ -285,6 +285,8 @@ struct Launcher {
     /// The folder the running game keeps its settings in: the game home, or a modpack's.
     client_home: Option<std::path::PathBuf>,
     crash: Option<Crash>,
+    /// The player pressed Stop on the running game, so its end isn't taken for a crash's.
+    game_stop_pressed: bool,
     /// The Servers page (`servers_page.rs`).
     servers: servers_page::Servers,
     /// Its Friends over the internet panel (`internet.rs`).

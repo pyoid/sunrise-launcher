@@ -42,6 +42,35 @@ pub(crate) struct LogsPanel {
     scroll: ScrollHandle,
 }
 
+/// Whether a game's end opens the panel: it ended in an error or left a crash report, and it
+/// wasn't the player's own Stop. A quit the game asked for exits cleanly and leaves it closed.
+pub(super) fn crash_opens_logs(failed: bool, report: bool, stopped: bool) -> bool {
+    (failed || report) && !stopped
+}
+
+impl LogsPanel {
+    /// Opens or closes, sliding from wherever the last open or close had got to.
+    fn set_open(&mut self, open: bool, now: Instant) {
+        self.open = open;
+        let mut fade = crate::motion::Fade::toward(self.fade, open, now);
+        fade.motion = sunrise_launcher_theme::MOVE;
+        self.fade = Some(fade);
+        self.paused = false;
+        self.drawn = None;
+    }
+
+    /// Opens on the Game tab, following its newest line. An open panel stays open.
+    fn show_game(&mut self, now: Instant) {
+        self.tab = Tab::Game;
+        if self.open {
+            self.paused = false;
+            self.drawn = None;
+        } else {
+            self.set_open(true, now);
+        }
+    }
+}
+
 impl Launcher {
     /// Whether the panel is open (or opening), for the sidebar's Logs row.
     pub(crate) fn logs_open(&self) -> bool {
@@ -50,13 +79,14 @@ impl Launcher {
 
     /// Opens the panel, or closes it.
     pub(crate) fn toggle_logs(&mut self) {
-        let logs = &mut self.ui.logs;
-        logs.open = !logs.open;
-        let mut fade = crate::motion::Fade::toward(logs.fade, logs.open, Instant::now());
-        fade.motion = sunrise_launcher_theme::MOVE;
-        logs.fade = Some(fade);
-        logs.paused = false;
-        logs.drawn = None;
+        let open = !self.ui.logs.open;
+        self.ui.logs.set_open(open, Instant::now());
+    }
+
+    /// The game crashed: its output comes up at its newest line, over whatever page is open.
+    /// The window is left where it is, so a player looking at another one isn't pulled back.
+    pub(super) fn show_crash_log(&mut self) {
+        self.ui.logs.show_game(Instant::now());
     }
 
     /// Escape: closes the panel if it is open.
@@ -269,3 +299,7 @@ impl Launcher {
         }))
     }
 }
+
+#[cfg(test)]
+#[path = "logs_panel/tests.rs"]
+mod tests;
