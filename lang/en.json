@@ -611,5 +611,8 @@
   "Log saved": "Log saved",
   "Couldn't save the log: {reason}": "Couldn't save the log: {reason}",
   "Nothing has been logged yet.": "Nothing has been logged yet.",
-  "The game's output shows here while it runs.": "The game's output shows here while it runs."
+  "The game's output shows here while it runs.": "The game's output shows here while it runs.",
+  "This SDK's native build tool is too old for this launcher (it speaks contract {tool}, the launcher {launcher}): install a newer version of the game build.": "This SDK's native build tool is too old for this launcher (it speaks contract {tool}, the launcher {launcher}): install a newer version of the game build.",
+  "This launcher and this SDK's native build tool speak different contracts, and the tool didn't say which is older: update the launcher, or install a newer version of the game build.": "This launcher and this SDK's native build tool speak different contracts, and the tool didn't say which is older: update the launcher, or install a newer version of the game build.",
+  "SDK tool first message after {ms} ms (start, layout and staging)": "SDK tool first message after {ms} ms (start, layout and staging)"
 }
