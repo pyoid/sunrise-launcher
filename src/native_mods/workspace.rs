@@ -23,13 +23,14 @@ pub(crate) const OLD_ATTEMPT_PREFIX: &str = ".native-attempt-";
 /// The SDK's work folder inside the kept folder.
 const WORK: &str = "w";
 /// The kept folders, under the native folder; one per game build and what built it.
-const KEPT: &str = "prebuilt-build";
+const KEPT: &str = "kept";
 /// Written into the kept folder while a compiler's tree isn't proven gone.
 const WORKER: &str = ".worker";
 /// Changes when what a kept folder holds would no longer fit the launcher that wrote it.
 const KEY_VERSION: &str = "1";
-/// A kept folder's name: 12 characters of the game's revision, a dash and 8 of the hash.
-const KEY_LENGTH: usize = 21;
+/// A kept folder's name: 12 characters of the game's revision, a dash and 6 of the hash. Short,
+/// as the tool's build folder sits below it and Windows' path limit counts every character.
+const KEY_LENGTH: usize = 19;
 /// The deepest file a Windows build writes under the work folder, as #396 found it: rustc's
 /// import definition for a raw-dylib DLL, in Cargo's target folder under the SDK's build key.
 const DEEPEST: &str = r"prebuilt-build\94256510f74e-f618d2e4182eb19e\target\x86_64-pc-windows-gnu\release\deps\rustcgsxNAs\api-ms-win-core-backgroundtask-l1-1-0.dll_imports_indirect.def";
@@ -75,7 +76,7 @@ pub(super) fn key(parts: &KeyParts<'_>) -> String {
     ]
     .join("\0");
     let revision = parts.revision.get(..12).unwrap_or(parts.revision);
-    format!("{revision}-{}", &sha256(hashed.as_bytes())[..8])
+    format!("{revision}-{}", &sha256(hashed.as_bytes())[..6])
 }
 
 /// The kept folder of one game build, held under its lock for as long as this lives.

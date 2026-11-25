@@ -806,7 +806,13 @@ fn ask_fenced(
             (line, Some(0)) => reply(line.as_deref(), true),
             (line, Some(1)) => reply(line.as_deref(), false),
             (None, code) => Err(ended(code, None)),
-            (Some(line), Some(3)) => Err(ended(Some(3), contract_of(&line))),
+            // A tool on another contract names its own; one that names this launcher's and still
+            // exits 3 is inconsistent.
+            (Some(line), Some(3))
+                if contract_of(&line).is_some_and(|theirs| theirs != CONTRACT) =>
+            {
+                Err(ended(Some(3), contract_of(&line)))
+            }
             (Some(_), _) => Err(invalid_check_reply()),
         }
         .map_err(CheckFailure::Refused)

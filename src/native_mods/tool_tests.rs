@@ -389,7 +389,9 @@ fn the_runner_refuses_duplicate_terminal_events_and_wrong_or_extra_check_replies
             .contains("incomplete or inconsistent"));
     }
     assert!(ask_sdk(&["EXIT2"]).unwrap_err().contains("didn't accept"));
-    assert!(ask_sdk(&["EXIT3"]).unwrap_err().contains("too old"));
+    assert!(ask_sdk(&["EXIT3"])
+        .unwrap_err()
+        .contains("different contracts"));
     let built = r#"{"event":"built","route":"prebuilt","binary":"/b/game","libraries":[],"records":[],"mods":[],"internals":{},"mixins":"x","used":[]}"#;
     let failed = r#"{"event":"failed","error":"another ending","blame":null,"used":[]}"#;
     let result = run(

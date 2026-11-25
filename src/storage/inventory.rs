@@ -7,10 +7,11 @@ use crate::{backend, instances, native_mods};
 use serde::Serialize;
 use std::sync::Arc;
 
-const BUILD_CACHES: [BuildCache; 10] = [
+const BUILD_CACHES: [BuildCache; 11] = [
     BuildCache::Source,
     BuildCache::Tools,
     BuildCache::PrebuiltOutput,
+    BuildCache::KeptBuilds,
     BuildCache::InternalsSync,
     BuildCache::Prebuilt,
     BuildCache::ServerBuilds,
@@ -189,14 +190,13 @@ impl Entry {
             }
         } else if parent == Path::new("native/source") {
             name
-        } else if parent == Path::new("native/prebuilt-build") {
+        } else if parent == Path::new("native/kept") {
             // `<first 12 of the game commit>-<hash of what the build was made from>`.
             name.split_once('-').map(|(revision, _)| revision)?
         } else {
             return None;
         };
-        let expected = if parent == Path::new("native/tools")
-            || parent == Path::new("native/prebuilt-build")
+        let expected = if parent == Path::new("native/tools") || parent == Path::new("native/kept")
         {
             12
         } else {
@@ -288,8 +288,11 @@ impl Entry {
     fn access(&self) -> Result<Access, Error> {
         match self.category {
             Category::RustCompiler => Ok(Access::BuildTools),
-            // No game runs from kept mod libraries: a build copies them into its workspace.
-            _ if self.relative.starts_with(BuildCache::KeptMods.relative()) => {
+            // No game runs from kept mod libraries or kept build folders: a build copies its
+            // libraries out of them into the game build it installs.
+            _ if self.relative.starts_with(BuildCache::KeptMods.relative())
+                || self.relative.starts_with(BuildCache::KeptBuilds.relative()) =>
+            {
                 Ok(Access::BuildTools)
             }
             _ => Access::for_unit(&self.path),
@@ -342,6 +345,7 @@ impl Storage {
                     | BuildCache::Source
                     | BuildCache::Tools
                     | BuildCache::PrebuiltOutput
+                    | BuildCache::KeptBuilds
                     | BuildCache::Prebuilt
                     | BuildCache::InternalsSync
             ) {
@@ -632,7 +636,7 @@ impl Storage {
                     "native/tools",
                     "native/internals-sync",
                     "native/prebuilt",
-                    "native/prebuilt-build",
+                    "native/kept",
                 ]
                 .iter()
                 .any(|root| entry.relative.starts_with(root))
@@ -654,7 +658,7 @@ impl Storage {
                         });
                     if used
                         && (entry.category == Category::PrebuiltGames
-                            || entry.relative.starts_with("native/prebuilt-build"))
+                            || entry.relative.starts_with("native/kept"))
                     {
                         Tier::Lru
                     } else if used {
@@ -1064,11 +1068,11 @@ mod eviction_tests {
         for (path, expected) in [
             (format!("native/source/{sha}"), Some(sha)),
             (format!("native/source/not-{sha}"), None),
-            (format!("native/prebuilt-build/{}-abcd", &sha[..12]), Some(&sha[..12])),
-            ("native/prebuilt-build/abc-1".to_owned(), None),
-            (format!("native/prebuilt-build/{}", &sha[..12]), None),
-            ("native/prebuilt-build/0123456789AB-abcd".to_owned(), None),
-            (format!("native/prebuilt-build/{}-abcd", &sha[..13]), None),
+            (format!("native/kept/{}-abcd", &sha[..12]), Some(&sha[..12])),
+            ("native/kept/abc-1".to_owned(), None),
+            (format!("native/kept/{}", &sha[..12]), None),
+            ("native/kept/0123456789AB-abcd".to_owned(), None),
+            (format!("native/kept/{}-abcd", &sha[..13]), None),
             (format!("native/tools/{}", &sha[..12]), Some(&sha[..12])),
             (
                 format!("native/prebuilt/{sha}-sunrise-prebuilt-v3-x86_64-unknown-linux-gnu"),

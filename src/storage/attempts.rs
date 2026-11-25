@@ -33,7 +33,11 @@ impl Storage {
             }
             let bytes = Tree::build(&path).map_or(0, |tree| tree.size(&mut HashSet::new()));
             // A folder in use, locked or refused stays: it is still counted and shown.
-            if Self::clear_entry(&self.directory, &native_dir, Path::new(&name)).is_ok() {
+            // Clearing empties the folder; the empty folder itself goes after.
+            // Clearing empties the folder down to its cache locks; the folder then goes.
+            if Self::clear_entry(&self.directory, &native_dir, Path::new(&name)).is_ok()
+                && fs::remove_dir_all(&path).is_ok()
+            {
                 freed += bytes;
             }
         }

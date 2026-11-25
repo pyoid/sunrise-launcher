@@ -63,12 +63,20 @@ impl Home {
 }
 
 #[test]
-fn storage_counts_unproved_compiler_work_but_never_offers_to_clear_it() {
+fn storage_counts_a_running_builds_folder_and_clears_it_once_the_build_is_gone() {
     let home = Home::new();
     let old = home.file(
         "launcher/native/.native-attempt-old/compiler/work",
         &[9; 16384],
     );
+    // The build that set the folder aside still runs: it holds the folder's owner lock.
+    let owner = fs::File::create(
+        home.0
+            .path()
+            .join("launcher/native/.native-attempt-old/.owner"),
+    )
+    .unwrap();
+    owner.try_lock().unwrap();
     let output = home.run(&["storage", "--clear", "build-files"]);
     assert!(!output.status.success(), "{output:?}");
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -81,10 +89,24 @@ fn storage_counts_unproved_compiler_work_but_never_offers_to_clear_it() {
     assert!(row["kept"][0]["reason"]
         .as_str()
         .unwrap()
-        .contains("prove all workers had stopped"));
+        .contains("can prove no build still uses them"));
     assert!(row["kept"][0]["bytes"].as_u64().unwrap() >= 16384);
     assert_eq!(row["kept"][0]["bytes"], row["remaining_bytes"]);
-    assert_eq!(fs::read(old).unwrap(), [9; 16384]);
+    assert_eq!(fs::read(&old).unwrap(), [9; 16384]);
+    drop(owner);
+    home.clear("build-files");
+    assert!(!old.exists());
+}
+
+#[test]
+fn clearing_build_files_removes_kept_build_folders() {
+    let home = Home::new();
+    let kept = home.file(
+        "launcher/native/kept/0123456789ab-abcdef/w/target/x",
+        &[7; 8192],
+    );
+    let row = home.clear("build-files");
+    assert!(!kept.exists(), "{row}");
 }
 
 #[test]

@@ -125,7 +125,8 @@ fn a_second_open_waits_for_the_lock_and_says_so() {
     let said = std::sync::atomic::AtomicUsize::new(0);
     let waiter = std::thread::scope(|scope| {
         let stop = stopped.clone();
-        let canceller = scope.spawn(|| {
+        let said = &said;
+        let canceller = scope.spawn(move || {
             while said.load(Ordering::SeqCst) == 0 {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
@@ -640,8 +641,9 @@ fn a_build_too_deep_for_windows_is_found_before_it_starts() {
             r"C:\Users\{user}\AppData\Roaming\sunrise\launcher\native"
         ))
     };
-    // #396's player, eight letters, still has room beside the kept folder's longer path.
+    // #396's player, eight letters, still has room beside the kept folder's path, and so does
+    // a user name of 21: the kept folder is `native\kept\<19>`.
     assert_eq!(too_deep(&home("abcdefgh")), None);
-    assert_eq!(too_deep(&home(&"u".repeat(9))), None);
-    assert_eq!(too_deep(&home(&"u".repeat(10))), Some(260));
+    assert_eq!(too_deep(&home(&"u".repeat(21))), None);
+    assert_eq!(too_deep(&home(&"u".repeat(22))), Some(260));
 }

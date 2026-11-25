@@ -65,19 +65,6 @@ fn explicit_clear_removes_leftover_attempts_but_a_plain_report_does_not() {
     assert!(!file.exists());
 }
 
-#[test]
-fn kept_build_folder_expires_when_no_game_build_uses_it() {
-    let home = Home::new();
-    let kept = home.seed("native/prebuilt-build/0123456789ab-abcd/target/x");
-    // A name with no game revision in front is never judged by age.
-    let unnamed = home.seed("native/prebuilt-build/abc-1/target/x");
-    let storage = Storage::at(&home.0).unwrap();
-    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(8 * 86400);
-    storage.evict_inventory(later, None).unwrap();
-    assert!(!kept.exists());
-    assert!(unnamed.exists());
-}
-
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "daily"]

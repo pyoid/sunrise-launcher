@@ -43,7 +43,7 @@ pub mod sdk_cache;
 pub use isolate::{kept as kept_left_out, kept_current, kept_stamp, Detail, LeftOut, Why};
 pub use picker::{Route, Routes};
 pub use tool::Cancellation;
-mod attempt_owner;
+pub(crate) mod attempt_owner;
 mod links;
 mod workspace;
 pub(crate) use workspace::{ATTEMPT_PREFIX, OLD_ATTEMPT_PREFIX};
@@ -3873,11 +3873,21 @@ mod tests {
         for path in ["sunrise-ctl", "sunrise-release.json", "tools/a.bin"] {
             assert_eq!(inode(&base, path), inode(&out, path), "{path}");
         }
-        for path in ["logs/latest.log", "cache/x", ".local/sunrise-client/26.3/data"] {
+        for path in [
+            "logs/latest.log",
+            "cache/x",
+            ".local/sunrise-client/26.3/data",
+        ] {
             assert_ne!(inode(&base, path), inode(&out, path), "{path}");
-            assert_eq!(fs::read(base.join(path)).unwrap(), fs::read(out.join(path)).unwrap());
+            assert_eq!(
+                fs::read(base.join(path)).unwrap(),
+                fs::read(out.join(path)).unwrap()
+            );
         }
-        let mode = fs::metadata(out.join("sunrise-ctl")).unwrap().permissions().mode();
+        let mode = fs::metadata(out.join("sunrise-ctl"))
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o111, 0o111);
         let mut log = fs::OpenOptions::new()
             .append(true)
