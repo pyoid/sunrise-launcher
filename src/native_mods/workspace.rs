@@ -2,7 +2,7 @@
 use super::{
     attempt_owner,
     links::{link_or_copy, Placed},
-    sdk_cache::Package,
+    sdk_cache::{listing, verify_slice, Package},
     tool, Path,
 };
 use std::{
@@ -263,7 +263,7 @@ impl Workspace {
             .and_then(|text| serde_json::from_slice::<Laid>(&text).ok());
         if let (Some(laid), Some(source)) = (&laid, signed_sdk) {
             if laid.source == source {
-                if listing(&root).is_ok_and(|now| now == laid.files) {
+                if listing(&root).is_some_and(|now| now == laid.files) {
                     return Ok(private);
                 }
                 log("The SDK files in this build folder changed: laying them out again");
@@ -286,6 +286,9 @@ impl Workspace {
         ] {
             match fs::symlink_metadata(from) {
                 Ok(meta) if meta.is_dir() && !crate::native_cache::linked(&meta) => {
+                    // The full check, against the sums the SDK cache recorded when it
+                    // unpacked what the signed index lists: before a link makes it the build's.
+                    verify_slice(from)?;
                     place_slice(from, to)?;
                 }
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {}
@@ -296,7 +299,7 @@ impl Workspace {
         if let Some(source) = signed_sdk {
             let laid = Laid {
                 source: source.to_owned(),
-                files: listing(&root)?,
+                files: listing(&root).ok_or_else(invalid)?,
             };
             fs::write(
                 &stamp,
@@ -526,46 +529,11 @@ impl Workspace {
     }
 }
 
-/// Every file under `dir`, `/`-separated relative to it, with its size and modified time.
-fn listing(dir: &Path) -> io::Result<BTreeMap<String, (u64, std::time::SystemTime)>> {
-    fn walk(
-        root: &Path,
-        dir: &Path,
-        out: &mut BTreeMap<String, (u64, std::time::SystemTime)>,
-    ) -> io::Result<()> {
-        for entry in fs::read_dir(dir)? {
-            let path = entry?.path();
-            let meta = fs::symlink_metadata(&path)?;
-            if crate::native_cache::linked(&meta) {
-                return Err(invalid());
-            } else if meta.is_dir() {
-                walk(root, &path, out)?;
-            } else if meta.is_file() {
-                let name = path
-                    .strip_prefix(root)
-                    .expect("under its root")
-                    .components()
-                    .map(|part| part.as_os_str().to_str())
-                    .collect::<Option<Vec<_>>>()
-                    .ok_or_else(invalid)?
-                    .join("/");
-                out.insert(name, (meta.len(), meta.modified()?));
-            } else {
-                return Err(invalid());
-            }
-        }
-        Ok(())
-    }
-    let mut out = BTreeMap::new();
-    walk(dir, dir, &mut out)?;
-    Ok(out)
-}
-
 /// What [`Workspace::lay_out_package`] laid out, and from which signed SDK.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Laid {
     source: String,
-    files: BTreeMap<String, (u64, std::time::SystemTime)>,
+    files: BTreeMap<String, (u64, u64)>,
 }
 
 /// Places the files of the slice `from` at `to`, linked or copied, each read-only. The tool names

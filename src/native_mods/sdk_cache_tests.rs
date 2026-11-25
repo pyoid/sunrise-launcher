@@ -628,3 +628,148 @@ fn a_developer_tool_is_honoured_by_a_debug_launcher_or_for_a_developer_base_only
     assert_eq!(any_mod.is_some(), cfg!(debug_assertions));
     assert_eq!(developer_base, Some(program));
 }
+
+/// The `api` slice of a fresh fetch, its file `deps/a.rmeta` and the SDK that listed it.
+fn fetched_slice(fixture: &Fixture) -> (Sdk, Package, PathBuf) {
+    let sdk = fixture.sdk(&[]).unwrap();
+    let package = slices_in(
+        &fixture.scratch.path().join("prebuilt"),
+        &sdk,
+        &fixture.base(),
+        "prebuilt-api",
+        TRIPLE,
+        Side::Client,
+        &|_| {},
+    )
+    .unwrap();
+    let file = package.api.join("deps/a.rmeta");
+    (sdk, package, file)
+}
+
+fn stamp_json(slice: &Path) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(stamp_path(slice)).unwrap()).unwrap()
+}
+
+fn set_time(file: &Path, time: std::time::SystemTime) {
+    fs::File::options()
+        .write(true)
+        .open(file)
+        .unwrap()
+        .set_modified(time)
+        .unwrap();
+}
+
+#[test]
+fn an_unpacked_slice_stamp_records_each_files_size_time_and_sha256() {
+    let fixture = Fixture::new();
+    let (_, package, file) = fetched_slice(&fixture);
+    let stamp = stamp_json(&package.api);
+    assert_eq!(stamp["files"]["deps/a.rmeta"], 8);
+    assert_eq!(
+        stamp["hashes"]["deps/a.rmeta"],
+        sunrise_launcher_smod::index::sha256_file(&file).unwrap()
+    );
+    let modified = fs::metadata(&file).unwrap().modified().unwrap();
+    let nanos = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    assert_eq!(
+        stamp["times"]["deps/a.rmeta"].as_u64().unwrap() as u128,
+        nanos
+    );
+}
+
+#[test]
+fn a_slice_edited_in_place_with_the_same_size_is_refetched() {
+    let fixture = Fixture::new();
+    let (sdk, package, file) = fetched_slice(&fixture);
+    let (bytes, time) = (
+        fs::read(&file).unwrap(),
+        fs::metadata(&file).unwrap().modified().unwrap(),
+    );
+    fs::write(&file, vec![b'x'; bytes.len()]).unwrap();
+    set_time(&file, time + std::time::Duration::from_secs(5));
+    assert!(!stamp_holds(&sdk, &api(), &package.api));
+    // Put back as it was: the same bytes at the same time hold again.
+    fs::write(&file, &bytes).unwrap();
+    set_time(&file, time);
+    assert!(stamp_holds(&sdk, &api(), &package.api));
+}
+
+#[test]
+fn a_touched_file_with_the_same_bytes_holds_and_the_stamp_takes_its_time() {
+    let fixture = Fixture::new();
+    let (sdk, package, file) = fetched_slice(&fixture);
+    let later =
+        fs::metadata(&file).unwrap().modified().unwrap() + std::time::Duration::from_secs(5);
+    set_time(&file, later);
+    assert!(stamp_holds(&sdk, &api(), &package.api));
+    let nanos = later
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    assert_eq!(
+        stamp_json(&package.api)["times"]["deps/a.rmeta"]
+            .as_u64()
+            .unwrap() as u128,
+        nanos
+    );
+}
+
+#[test]
+fn an_old_stamp_without_times_or_sums_holds_on_size_and_is_filled_in_once() {
+    // Filling a stamp in is said in the build log.
+    let _scratch = super::super::tests::scratch_state();
+    let fixture = Fixture::new();
+    let (sdk, package, file) = fetched_slice(&fixture);
+    let mut old = stamp_json(&package.api);
+    old.as_object_mut().unwrap().remove("times");
+    old.as_object_mut().unwrap().remove("hashes");
+    fs::write(stamp_path(&package.api), serde_json::to_vec(&old).unwrap()).unwrap();
+    // Even a touched file holds: an old stamp knows only sizes.
+    set_time(
+        &file,
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000),
+    );
+    assert!(stamp_holds(&sdk, &api(), &package.api));
+    let heard = std::cell::RefCell::new(Vec::new());
+    let kept = |fetched: Fetched| heard.borrow_mut().push(fetched);
+    fs::remove_dir_all(fixture.scratch.path().join("base")).unwrap();
+    let slices = || {
+        slices_in(
+            &fixture.scratch.path().join("prebuilt"),
+            &sdk,
+            &fixture.base(),
+            "prebuilt-api",
+            TRIPLE,
+            Side::Client,
+            &kept,
+        )
+        .unwrap()
+    };
+    assert_eq!(slices(), package);
+    // Nothing was fetched, and the stamp now has what the file really is.
+    assert_eq!(*heard.borrow(), [Fetched { done: 0, total: 0 }]);
+    let filled = stamp_json(&package.api);
+    assert_eq!(
+        filled["hashes"]["deps/a.rmeta"],
+        sunrise_launcher_smod::index::sha256_file(&file).unwrap()
+    );
+    assert!(filled["times"]["deps/a.rmeta"].is_u64());
+    // Recorded once: a second look leaves the stamp as it is.
+    slices();
+    assert_eq!(stamp_json(&package.api), filled);
+}
+
+#[test]
+fn the_sums_of_a_slice_are_checked_against_its_stamp_when_it_is_laid_out() {
+    let fixture = Fixture::new();
+    let (_, package, file) = fetched_slice(&fixture);
+    verify_slice(&package.api).unwrap();
+    let bytes = fs::read(&file).unwrap();
+    fs::write(&file, vec![b'x'; bytes.len()]).unwrap();
+    assert!(verify_slice(&package.api).is_err());
+    // A folder with no stamp (a developer's own SDK) has nothing to check against.
+    verify_slice(fixture.scratch.path()).unwrap();
+}

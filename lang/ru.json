@@ -1965,5 +1965,6 @@
   "Log saved": "Log saved",
   "Couldn't save the log: {reason}": "Couldn't save the log: {reason}",
   "Nothing has been logged yet.": "Nothing has been logged yet.",
-  "The game's output shows here while it runs.": "The game's output shows here while it runs."
+  "The game's output shows here while it runs.": "The game's output shows here while it runs.",
+  "The SDK files in the cache no longer match their checksums. Clear the build files on the Storage page, then build again.": "The SDK files in the cache no longer match their checksums. Clear the build files on the Storage page, then build again."
 }
