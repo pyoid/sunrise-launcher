@@ -1,7 +1,7 @@
 //! The kept build folder of one game build: SDK inputs and the writable paths of a native compile.
 use super::{
     attempt_owner,
-    links::{link_or_copy, Placed},
+    links::{self, link_or_copy, Placed},
     sdk_cache::{listing, verify_slice, Package},
     tool, Path,
 };
@@ -102,12 +102,25 @@ pub(super) struct Library {
     pub(super) name: String,
     pub(super) source: std::path::PathBuf,
     pub(super) sha256: String,
+    /// The source is a file no build rewrites (the SDK package's runtime, the standard library,
+    /// the MinGW runtime), so an install links it instead of copying it.
+    pub(super) shared: bool,
 }
 
 impl Library {
     pub(super) fn copy_into(&self, destination: &Path) -> io::Result<()> {
         let output = destination.join(&self.name);
-        fs::copy(&self.source, &output)?;
+        if self.shared {
+            links::link_or_copy(&self.source, &output)?;
+        } else {
+            // Unlinked first: a carried file of this name may be a link into the base.
+            match fs::remove_file(&output) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+            crate::preparer::clone_or_copy(&self.source, &output)?;
+        }
+        // After a link this reads the source's own bytes, so it still proves them.
         if sha256_file(&output).is_ok_and(|digest| digest == self.sha256) {
             Ok(())
         } else {
@@ -442,6 +455,8 @@ impl Workspace {
                 || (!stamped
                     && built.route == tool::CheckRoute::Prebuilt
                     && file.starts_with(&joined_runtime));
+            // When true, the first branch below is the one taken.
+            let shared = dynamic && !produced && (runtime() || standard() || gnu());
             let source = if dynamic
                 && ((produced && regular_under(self.path(), &file).is_ok())
                     || runtime()
@@ -459,6 +474,7 @@ impl Workspace {
                 name: name.to_owned(),
                 source,
                 sha256,
+                shared,
             };
             if files.insert(name.to_ascii_lowercase(), library).is_some() {
                 return Err(invalid());
