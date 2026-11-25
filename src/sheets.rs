@@ -776,14 +776,13 @@ impl Launcher {
                 let copy = log.clone();
                 let save = log.clone();
                 controls = controls
-                    .child(
-                        button("install-log-copy", tr("Copy")).on_click(move |_, _, cx| {
-                            crate::widgets::copy_to_clipboard(
-                                cx,
-                                gpui::ClipboardItem::new_string(copy.to_string()),
-                            );
-                        }),
-                    )
+                    .child(crate::frame::copy_button_with(
+                        "install-log-copy",
+                        tr("Copy"),
+                        // Its length, not its text: a build log is long to hash on every frame.
+                        log.len(),
+                        move |_| copy.to_string(),
+                    ))
                     .child(
                         button("install-log-save", tr("Save log")).on_click(cx.listener(
                             move |this, _, _, cx| {

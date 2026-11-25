@@ -40,7 +40,6 @@ pub(super) struct Internet {
     /// The invitation just made, its link shown to copy.
     fresh: Option<Invite>,
     confirm_limit: bool,
-    copied: Option<(String, Instant)>,
     tx: Sender<Event>,
     rx: Receiver<Event>,
 }
@@ -65,7 +64,6 @@ impl Internet {
             message: None,
             fresh: None,
             confirm_limit: false,
-            copied: None,
             tx,
             rx,
         }

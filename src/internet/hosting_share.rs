@@ -31,22 +31,8 @@ impl Launcher {
         }
     }
 
-    fn share_copy(&self, id: &'static str, text: String, cx: &mut Context<Self>) -> Stateful<Div> {
-        let copied = self
-            .internet
-            .copied
-            .as_ref()
-            .is_some_and(|(what, at)| what == &text && at.elapsed() < Duration::from_secs(2));
-        self.share_button(
-            id,
-            tr(if copied { "Copied" } else { "Copy" }),
-            true,
-            cx,
-            move |this, cx| {
-                copy_to_clipboard(cx, gpui::ClipboardItem::new_string(text.clone()));
-                this.internet.copied = Some((text.clone(), Instant::now()));
-            },
-        )
+    fn share_copy(&self, id: &'static str, text: String) -> Stateful<Div> {
+        crate::frame::copy_button(id, tr("Copy"), text)
     }
 
     fn share_field(
@@ -191,7 +177,7 @@ impl Launcher {
                                 // space after each dot is a place it may wrap. Copy takes the plain one.
                                 .child(address.replace('.', ".\u{200B}")),
                         )
-                        .child(self.share_copy("share-copy", address, cx)),
+                        .child(self.share_copy("share-copy", address)),
                 )
                 .child(hint(if node.magic_dns && !ip.is_empty() {
                     let ip_port = if port == 25565 {
@@ -344,7 +330,7 @@ impl Launcher {
                             .text_size(px(12.))
                             .child(fresh.url.clone()),
                     )
-                    .child(self.share_copy("share-fresh-copy", fresh.url, cx)),
+                    .child(self.share_copy("share-fresh-copy", fresh.url)),
             );
         }
         match self.internet.invites.clone() {
@@ -513,7 +499,7 @@ impl Launcher {
                             div()
                                 .flex()
                                 .gap(px(6.))
-                                .child(self.share_copy("share-snippet-copy", snippet, cx))
+                                .child(self.share_copy("share-snippet-copy", snippet))
                                 .child(link(
                                     "share-acls",
                                     "Open access controls",

@@ -750,9 +750,6 @@ impl Launcher {
                 }
             },
         );
-        let copied = s
-            .copied
-            .is_some_and(|at| at.elapsed() < Duration::from_secs(2));
         let shown = address.clone().unwrap_or_else(|| {
             tr(match (internet, lookup) {
                 _ if local_only => "Local connections only",
@@ -789,21 +786,12 @@ impl Launcher {
                             .text_size(px(tokens::HEADING))
                             .child(shown),
                     )
-                    .child(self.host_button(
-                        "host-address-copy",
-                        tr(if copied { "Copied" } else { "Copy" }),
-                        address.is_some(),
-                        cx,
-                        move |this, cx| {
-                            if let Some(address) = &address {
-                                copy_to_clipboard(
-                                    cx,
-                                    gpui::ClipboardItem::new_string(address.clone()),
-                                );
-                                this.servers.copied = Some(Instant::now());
-                            }
-                        },
-                    )),
+                    .child(match address {
+                        Some(address) => {
+                            crate::frame::copy_button("host-address-copy", tr("Copy"), address)
+                        }
+                        None => off(button("host-address-copy", tr("Copy"))),
+                    }),
             );
 
         if local_only {
