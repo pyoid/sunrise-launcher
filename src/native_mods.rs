@@ -2058,13 +2058,13 @@ fn build_stages(
             )
             .map_err(|e| e.to_string())?;
         append_log(&format!(
-            "Filled the download cache: {} crates linked, {} copied. {}",
+            "Filled this build folder's download cache from the shared one: {} downloads linked, {} files copied (the crates.io index is always copied, as Cargo rewrites it in place). {}",
             filled.linked,
             filled.copied,
             if filled.offline {
-                "The lock is as the last fetch left it: no fetch."
+                "The locks and the cache are as the last good fetch here left them: the SDK tool's fetch runs offline."
             } else {
-                "The lock or the cache changed: fetching."
+                "The locks or the cache changed since the last good fetch here: the SDK tool's fetch goes online."
             }
         ))
         .map_err(Failed::Other)?;

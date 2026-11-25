@@ -32,6 +32,8 @@ fn fake(dir: &Path, events: &[&str]) -> std::process::Command {
 #[test]
 #[ignore = "daily"]
 fn a_tool_run_reports_its_mods_answers_its_crates_question_and_ends_built_or_blamed() {
+    // `run` writes the tool's start-up line into the shared build log.
+    let _guard = super::super::tests::scratch_state();
     let dir = std::env::temp_dir().join(format!("sunrise-native-tool-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let started = RefCell::new(Vec::new());
@@ -121,6 +123,8 @@ fn a_tool_run_reports_its_mods_answers_its_crates_question_and_ends_built_or_bla
 #[cfg(unix)]
 #[test]
 fn published_sdk_reply_names_the_archive_id_not_the_cargo_package() {
+    // `run` writes the tool's start-up line into the shared build log.
+    let _guard = super::super::tests::scratch_state();
     use super::super::{registry_failure, ConflictRequirement, Failed, RegistryConflict};
     let dir = tempfile::tempdir().unwrap();
     let reply =
@@ -156,6 +160,8 @@ fn published_sdk_reply_names_the_archive_id_not_the_cargo_package() {
 #[cfg(unix)]
 #[test]
 fn resolver_failure_uses_cargos_requiring_chains_not_the_mods_lock_versions() {
+    // `run` writes the tool's start-up line into the shared build log.
+    let _guard = super::super::tests::scratch_state();
     use super::super::{registry_failure, ConflictRequirement, Failed, RegistryConflict};
     let dir = tempfile::tempdir().unwrap();
     let details = include_str!("../../tests/fixtures/native-registry-conflicts.txt");
@@ -287,6 +293,8 @@ fn not_starting_a_worker_does_not_retain_its_staged_directory() {
 #[test]
 #[cfg(target_os = "linux")]
 fn an_sdk_exit_or_stop_finishes_even_while_a_descendant_keeps_both_pipes_open() {
+    // `run` writes the tool's start-up line into the shared build log.
+    let _guard = super::super::tests::scratch_state();
     for case in ["exit", "stop", "check"] {
         let scratch = tempfile::tempdir().unwrap();
         let path = scratch.path().to_owned();
@@ -361,6 +369,8 @@ exit 125
 #[test]
 #[cfg(unix)]
 fn the_runner_refuses_duplicate_terminal_events_and_wrong_or_extra_check_replies() {
+    // `run` writes the tool's start-up line into the shared build log.
+    let _guard = super::super::tests::scratch_state();
     let dir = tempfile::tempdir().unwrap();
     let good = r#"{"contract":2,"route":null,"mods":[]}"#;
     let refusal = r#"{"contract":2,"error":{"kind":"unread","message":"fixture refused"}}"#;
@@ -414,6 +424,8 @@ fn the_runner_refuses_duplicate_terminal_events_and_wrong_or_extra_check_replies
 #[cfg(unix)]
 #[ignore = "daily"]
 fn leader_success_or_blamed_failure_is_not_a_compiler_handoff() {
+    // `run` writes the tool's start-up line into the shared build log.
+    let _guard = super::super::tests::scratch_state();
     let dir = tempfile::tempdir().unwrap();
     let built = r#"{"event":"built","route":"prebuilt","binary":"/b/game","libraries":[],"records":[],"mods":[],"internals":{},"mixins":"x","used":[]}"#;
     let failed = r#"{"event":"failed","error":"compile error","blame":{"mod":"greeter","kind":"compile"},"used":[]}"#;

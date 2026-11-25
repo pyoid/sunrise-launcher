@@ -113,7 +113,7 @@ impl BuildCache {
             Self::Source => "native/source",
             Self::Tools => "native/tools",
             Self::PrebuiltOutput => "native/prebuilt-build",
-            Self::KeptBuilds => "native/kept",
+            Self::KeptBuilds => "native/k",
             Self::InternalsSync => "native/internals-sync",
             Self::Prebuilt => "native/prebuilt",
             Self::ServerBuilds => "native/server-builds",

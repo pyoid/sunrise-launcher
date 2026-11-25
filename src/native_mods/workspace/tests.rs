@@ -24,7 +24,7 @@ fn parts() -> KeyParts<'static> {
 fn the_kept_folder_is_named_by_the_game_build_and_what_built_it() {
     let same = key(&parts());
     assert_eq!(same, key(&parts()));
-    assert!(same.starts_with("0123456789ab-"));
+    assert!(same.starts_with("01234"));
     assert_eq!(same.len(), KEY_LENGTH);
     let others = [
         KeyParts {
@@ -295,6 +295,13 @@ fn a_kept_folder_with_read_only_files_can_be_removed() {
     fs::remove_dir_all(stage.path()).unwrap();
     assert!(!stage.path().exists());
     assert_eq!(fs::read(cached.api.join("top")).unwrap(), b"slice");
+    // A link shares the read-only flag with the cache's own file: the cache's removal of a
+    // game unit (`runtime_leases::Registry::remove_unit`) goes through cap-std and still works.
+    cap_std::fs::Dir::open_ambient_dir(dir.path(), cap_std::ambient_authority())
+        .unwrap()
+        .remove_dir_all("cache")
+        .unwrap();
+    assert!(!dir.path().join("cache").exists());
 }
 
 #[test]
@@ -641,9 +648,9 @@ fn a_build_too_deep_for_windows_is_found_before_it_starts() {
             r"C:\Users\{user}\AppData\Roaming\sunrise\launcher\native"
         ))
     };
-    // #396's player, eight letters, still has room beside the kept folder's path, and so does
-    // a user name of 21: the kept folder is `native\kept\<19>`.
+    // The same limit as 1.3.4's attempt folder (`native\.nb-a1B2c3`): `native\k\<8>` is as
+    // long, so a user name of up to 35 letters builds, #396's player (eight) among them.
     assert_eq!(too_deep(&home("abcdefgh")), None);
-    assert_eq!(too_deep(&home(&"u".repeat(21))), None);
-    assert_eq!(too_deep(&home(&"u".repeat(22))), Some(260));
+    assert_eq!(too_deep(&home(&"u".repeat(35))), None);
+    assert_eq!(too_deep(&home(&"u".repeat(36))), Some(260));
 }

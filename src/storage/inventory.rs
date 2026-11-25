@@ -190,15 +190,19 @@ impl Entry {
             }
         } else if parent == Path::new("native/source") {
             name
-        } else if parent == Path::new("native/kept") {
-            // `<first 12 of the game commit>-<hash of what the build was made from>`.
-            name.split_once('-').map(|(revision, _)| revision)?
+        } else if parent == Path::new("native/k") {
+            // The first 5 of the game commit, then 3 of the hash of what the build was made
+            // from: all 8 lowercase hex.
+            name.get(..5).filter(|_| {
+                name.len() == 8 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            })?
         } else {
             return None;
         };
-        let expected = if parent == Path::new("native/tools") || parent == Path::new("native/kept")
-        {
+        let expected = if parent == Path::new("native/tools") {
             12
+        } else if parent == Path::new("native/k") {
+            5
         } else {
             40
         };
@@ -636,7 +640,7 @@ impl Storage {
                     "native/tools",
                     "native/internals-sync",
                     "native/prebuilt",
-                    "native/kept",
+                    "native/k",
                 ]
                 .iter()
                 .any(|root| entry.relative.starts_with(root))
@@ -658,7 +662,7 @@ impl Storage {
                         });
                     if used
                         && (entry.category == Category::PrebuiltGames
-                            || entry.relative.starts_with("native/kept"))
+                            || entry.relative.starts_with("native/k"))
                     {
                         Tier::Lru
                     } else if used {
@@ -1068,11 +1072,12 @@ mod eviction_tests {
         for (path, expected) in [
             (format!("native/source/{sha}"), Some(sha)),
             (format!("native/source/not-{sha}"), None),
-            (format!("native/kept/{}-abcd", &sha[..12]), Some(&sha[..12])),
-            ("native/kept/abc-1".to_owned(), None),
-            (format!("native/kept/{}", &sha[..12]), None),
-            ("native/kept/0123456789AB-abcd".to_owned(), None),
-            (format!("native/kept/{}-abcd", &sha[..13]), None),
+            (format!("native/k/{}abc", &sha[..5]), Some(&sha[..5])),
+            ("native/k/abc-1".to_owned(), None),
+            (format!("native/k/{}", &sha[..5]), None),
+            ("native/k/01234ABC".to_owned(), None),
+            (format!("native/k/{}abcd", &sha[..5]), None),
+            (format!("native/k/{}-ab", &sha[..5]), None),
             (format!("native/tools/{}", &sha[..12]), Some(&sha[..12])),
             (
                 format!("native/prebuilt/{sha}-sunrise-prebuilt-v3-x86_64-unknown-linux-gnu"),

@@ -101,10 +101,7 @@ fn storage_counts_a_running_builds_folder_and_clears_it_once_the_build_is_gone()
 #[test]
 fn clearing_build_files_removes_kept_build_folders() {
     let home = Home::new();
-    let kept = home.file(
-        "launcher/native/kept/0123456789ab-abcdef/w/target/x",
-        &[7; 8192],
-    );
+    let kept = home.file("launcher/native/k/01234abc/w/target/x", &[7; 8192]);
     let row = home.clear("build-files");
     assert!(!kept.exists(), "{row}");
 }

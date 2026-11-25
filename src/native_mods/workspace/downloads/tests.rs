@@ -43,10 +43,7 @@ fn the_crates_are_linked_and_the_index_copied_but_no_sources_come_along() {
         .unwrap();
     assert_eq!((filled.linked, filled.copied), (1, 1));
     let own = f.workspace.path().join("cargo/registry");
-    let (shared_crate, own_crate) = (
-        f.shared.join("registry/cache/idx/a-1.0.crate"),
-        own.join("cache/idx/a-1.0.crate"),
-    );
+    let own_crate = own.join("cache/idx/a-1.0.crate");
     assert_eq!(fs::read(&own_crate).unwrap(), b"crate a");
     assert_eq!(
         fs::read(own.join("index/idx/.cache/a/a")).unwrap(),
@@ -57,6 +54,7 @@ fn the_crates_are_linked_and_the_index_copied_but_no_sources_come_along() {
     {
         use std::os::unix::fs::MetadataExt;
         let ino = |file: &Path| fs::metadata(file).unwrap().ino();
+        let shared_crate = f.shared.join("registry/cache/idx/a-1.0.crate");
         assert_eq!(ino(&own_crate), ino(&shared_crate));
         assert_ne!(
             ino(&own.join("index/idx/.cache/a/a")),

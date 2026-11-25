@@ -28,17 +28,34 @@ impl Storage {
                 continue;
             }
             #[cfg(target_os = "linux")]
-            if !matches!(process_uses(&path), Ok(false)) {
+            // A process can't be read for an instant while it execs (EACCES): a failed scan
+            // is tried again a moment later before the folder is kept for the next cleanup.
+            let unused = (0..5).any(|attempt| {
+                if attempt > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                matches!(process_uses(&path), Ok(false))
+            });
+            if !unused {
                 continue;
             }
             let bytes = Tree::build(&path).map_or(0, |tree| tree.size(&mut HashSet::new()));
             // A folder in use, locked or refused stays: it is still counted and shown.
-            // Clearing empties the folder; the empty folder itself goes after.
             // Clearing empties the folder down to its cache locks; the folder then goes.
             if Self::clear_entry(&self.directory, &native_dir, Path::new(&name)).is_ok()
                 && fs::remove_dir_all(&path).is_ok()
             {
                 freed += bytes;
+                // What proved its build over differs by system: say which proof it was.
+                crate::launcher_log::line(format!(
+                    "Removed the leftover build folder {}: no build holds the build lease or its owner lock{}.",
+                    path.display(),
+                    if cfg!(target_os = "linux") {
+                        ", and no process has it open"
+                    } else {
+                        " (on this system a compiler that left its process tree isn't looked for further)"
+                    }
+                ));
             }
         }
         Ok(freed)
@@ -68,6 +85,15 @@ fn process_uses(folder: &Path) -> std::io::Result<bool> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
         }
+        // A process that ends while it is read fails the read in more ways than NotFound (ESRCH
+        // among them): an error from a process that is gone afterwards is no use of the folder.
+        let ended = |error: std::io::Error| {
+            if error.kind() == std::io::ErrorKind::NotFound || !process.exists() {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        };
         let mut links = vec![
             process.join("cwd"),
             process.join("exe"),
@@ -76,19 +102,23 @@ fn process_uses(folder: &Path) -> std::io::Result<bool> {
         match fs::read_dir(process.join("fd")) {
             Ok(fds) => {
                 for fd in fds {
-                    links.push(fd?.path());
+                    match fd {
+                        Ok(fd) => links.push(fd.path()),
+                        Err(error) => ended(error)?,
+                    }
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
+            Err(error) => {
+                ended(error)?;
+                continue;
+            }
         }
         for link in links {
             match fs::read_link(&link) {
                 Ok(target) if target.starts_with(folder) => return Ok(true),
                 Ok(_) => {}
                 // The process ended, or (exe of a kernel thread) has no such link.
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
+                Err(error) => ended(error)?,
             }
         }
     }

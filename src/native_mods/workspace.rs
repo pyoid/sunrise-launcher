@@ -22,15 +22,16 @@ pub(crate) const ATTEMPT_PREFIX: &str = ".nb-";
 pub(crate) const OLD_ATTEMPT_PREFIX: &str = ".native-attempt-";
 /// The SDK's work folder inside the kept folder.
 const WORK: &str = "w";
-/// The kept folders, under the native folder; one per game build and what built it.
-const KEPT: &str = "kept";
+/// The kept folders, under the native folder; one per game build and what built it. `k\<8>` is
+/// as long as 1.3.4's attempt folder (`.nb-` and 6 characters), so every path below it is too.
+const KEPT: &str = "k";
 /// Written into the kept folder while a compiler's tree isn't proven gone.
 const WORKER: &str = ".worker";
 /// Changes when what a kept folder holds would no longer fit the launcher that wrote it.
 const KEY_VERSION: &str = "1";
-/// A kept folder's name: 12 characters of the game's revision, a dash and 6 of the hash. Short,
-/// as the tool's build folder sits below it and Windows' path limit counts every character.
-const KEY_LENGTH: usize = 19;
+/// A kept folder's name: 5 characters of the game's revision, then 3 of the hash. Short, as the
+/// tool's build folder sits below it and Windows' path limit counts every character.
+const KEY_LENGTH: usize = 8;
 /// The deepest file a Windows build writes under the work folder, as #396 found it: rustc's
 /// import definition for a raw-dylib DLL, in Cargo's target folder under the SDK's build key.
 const DEEPEST: &str = r"prebuilt-build\94256510f74e-f618d2e4182eb19e\target\x86_64-pc-windows-gnu\release\deps\rustcgsxNAs\api-ms-win-core-backgroundtask-l1-1-0.dll_imports_indirect.def";
@@ -75,8 +76,8 @@ pub(super) fn key(parts: &KeyParts<'_>) -> String {
         },
     ]
     .join("\0");
-    let revision = parts.revision.get(..12).unwrap_or(parts.revision);
-    format!("{revision}-{}", &sha256(hashed.as_bytes())[..6])
+    let revision = parts.revision.get(..5).unwrap_or(parts.revision);
+    format!("{revision}{}", &sha256(hashed.as_bytes())[..3])
 }
 
 /// The kept folder of one game build, held under its lock for as long as this lives.
@@ -208,11 +209,11 @@ impl Workspace {
     }
 
     /// Where a profile's mods are staged for the tool, the same path every build: the tool
-    /// names its own stage folder after it.
+    /// names its own stage folder after it. `m\<10>` is as long as 1.3.4's `mods.compile`.
     pub(super) fn mods(&self, profile: &Path) -> PathBuf {
         self.path()
-            .join("mods")
-            .join(&sha256(profile.as_os_str().as_encoded_bytes())[..12])
+            .join("m")
+            .join(&sha256(profile.as_os_str().as_encoded_bytes())[..10])
     }
 
     pub(super) fn isolate(&self, command: &mut std::process::Command) -> io::Result<()> {

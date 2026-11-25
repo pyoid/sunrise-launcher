@@ -11,7 +11,7 @@
 //!   and only for a mod library whose bytes it verified there (`Library`). With it go the two
 //!   files the tool needs to see it as up to date: its fingerprint and, on Windows, its import
 //!   library. The whole-set patch library is never kept. A registry-route build's own outputs
-//!   are not copied into this store, because the kept build folder (`native/kept/<key>`,
+//!   are not copied into this store, because the kept build folder (`native/k/<key>`,
 //!   shared by every profile on a game build) keeps them between builds; this supersedes the
 //!   earlier rule that nothing of a registry-route build is kept. `verify_outputs` still checks
 //!   every library before it is installed.

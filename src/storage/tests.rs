@@ -253,7 +253,7 @@ fn child_cargo_locks_prevent_clear_and_survive_idle_cleanup() {
         (BuildCache::Source, "native/source"),
         (BuildCache::Tools, "native/tools"),
         (BuildCache::PrebuiltOutput, "native/prebuilt-build"),
-        (BuildCache::KeptBuilds, "native/kept"),
+        (BuildCache::KeptBuilds, "native/k"),
         (BuildCache::InternalsSync, "native/internals-sync"),
         (BuildCache::Prebuilt, "native/prebuilt"),
         (BuildCache::ServerBuilds, "native/server-builds"),
