@@ -300,8 +300,14 @@ impl Client<'_> {
         let home = profile.home().to_owned();
         let mode = self.instance.native_profile;
         let started = std::cell::Cell::new(false);
+        // Checking the files of a profile that has played ends where a build starts: the build
+        // is its own step ("Building native mods").
+        let checking = std::cell::RefCell::new(None::<crate::launcher_log::Step>);
         let native = |base: &str, step| {
             if !started.replace(true) {
+                if let Some(checking) = checking.take() {
+                    checking.done("the mods need a build");
+                }
                 progress(Progress::NativeBuild {
                     base: base.into(),
                     mods: crate::native_status::build_mods(&home),
@@ -311,7 +317,7 @@ impl Client<'_> {
         };
         let log = |output| progress(Progress::NativeLog(output));
         if let Some(old) = profile.active()? {
-            let checking = crate::launcher_log::step("Checking game files");
+            checking.replace(Some(crate::launcher_log::step("Checking game files")));
             check_build(old.base(), old.variant.as_deref())?;
             // Prepare without the game-manifest lock. The profile stays admitted and the
             // saved generation continues to reserve this base until refresh commits.
@@ -332,7 +338,9 @@ impl Client<'_> {
             // Legacy writers still use the game lock, not profile admission. Keep
             // them out until refresh has staged the exact set we checked.
             let _manifest = game_lock(&home)?;
-            checking.note("the profile's lock is held");
+            if let Some(checking) = &*checking.borrow() {
+                checking.note("the profile's lock is held");
+            }
             crate::browser::installed::recover_game_install(&home).map_err(StartError::Journal)?;
             let notices = catalogue::inspect(&home, load_index)?;
             let active = profile
@@ -345,7 +353,9 @@ impl Client<'_> {
                 )
                 .map_err(|error| native_failure(&home, error, || Some(Build::Active(old))))?
                 .ok_or_else(|| unsettled!())?;
-            checking.done("");
+            if let Some(checking) = checking.take() {
+                checking.done("");
+            }
             return Ok((active, notices));
         }
 
