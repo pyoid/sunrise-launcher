@@ -264,7 +264,7 @@ fn not_starting_a_worker_does_not_retain_its_staged_directory() {
         ),
         (fake(dir.path(), &[]), &stopped, super::super::CANCELLED),
     ] {
-        let mut workspace = Workspace::new(dir.path()).unwrap();
+        let mut workspace = Workspace::scratch(dir.path(), "scratch");
         let path = workspace.path().to_owned();
         std::fs::write(path.join("staged-sdk"), b"private").unwrap();
         let failure = run(
@@ -278,7 +278,8 @@ fn not_starting_a_worker_does_not_retain_its_staged_directory() {
         .unwrap_err();
         assert!(failure.error.contains(expected), "{}", failure.error);
         drop(workspace);
-        assert!(!path.exists());
+        // Nothing started, so the folder stays for the next build, with no worker to prove gone.
+        assert!(path.join("staged-sdk").exists() && !path.join(".worker").exists());
         assert!(!dir.path().join("plan").exists());
     }
 }
@@ -305,7 +306,7 @@ case "$2" in
 esac
 exit 125
 "#, "sdk"]).arg(&actor).arg(case);
-            let mut workspace = Workspace::new(&actor).unwrap();
+            let mut workspace = Workspace::scratch(&actor, "scratch");
             let workspace_path = workspace.path().to_owned();
             let error = if case == "check" {
                 ask(command, "native-check", &serde_json::json!({}), &active).unwrap_err()
@@ -519,14 +520,14 @@ printf '%s\n' '{"event":"built","route":"prebuilt-api","binary":"unused","librar
         )
     };
     let stop = Cancellation::default();
-    let mut first = Workspace::new(root.path()).unwrap();
+    let mut first = Workspace::scratch(root.path(), "first");
     let old = first.path().to_owned();
     let error = build_fixture(&detached, &mut first, &stop, &|_, _, _| stop.stop()).unwrap_err();
     assert_eq!(error.error, super::super::CANCELLED);
     drop(first);
     assert!(old.join("tmp/holding").exists() && !old.join("tmp/finished").exists());
 
-    let mut retry = Workspace::new(root.path()).unwrap();
+    let mut retry = Workspace::scratch(root.path(), "retry");
     let fresh = Cancellation::default();
     let result = build_fixture(&succeeds, &mut retry, &fresh, &|_, _, _| unreachable!());
     assert_eq!(result.unwrap().route, CheckRoute::PrebuiltApi);
@@ -561,15 +562,15 @@ printf '%s\n' '{"event":"built","route":"prebuilt-api","binary":"unused","librar
         !stage_root.exists(),
         "only reclaim after the real staged writer exits"
     );
-    let clean = retry.path().to_owned();
+    let proved = retry.path().to_owned();
     drop(retry);
-    assert!(!clean.exists());
+    assert!(proved.exists() && !proved.join(".worker").exists());
 }
 
 #[test]
 fn build_plan_and_process_use_the_same_private_cargo_home() {
     let dir = tempfile::tempdir().unwrap();
-    let mut workspace = Workspace::new(dir.path()).unwrap();
+    let mut workspace = Workspace::scratch(dir.path(), "scratch");
     let path = workspace.path().to_owned();
     let rust = Toolchain {
         dir: path.join("rust"),

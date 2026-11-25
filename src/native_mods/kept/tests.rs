@@ -569,3 +569,16 @@ fn a_mod_linking_to_one_that_comes_later_has_no_key() {
     assert!(!keys.contains_key("ftb"));
     assert!(keys.contains_key("ae2"));
 }
+
+#[test]
+fn a_folder_kept_from_the_last_build_is_seeded_again_without_copying_over_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let kept = Kept::new(&dir.path().join("native"));
+    let list = mods(&[]);
+    let keys = keys(&build(), &list);
+    let (work, built, libraries) = work_with(&dir.path().join("first"), ALL);
+    kept.save(&work, &built, &libraries, &list, &keys).unwrap();
+    let next = dir.path().join("second/work");
+    assert_eq!(kept.seed(&next, &list, &keys), ["ae2", "ftb", "hnn"]);
+    assert_eq!(kept.seed(&next, &list, &keys), ["ae2", "ftb", "hnn"]);
+}

@@ -1,59 +1,162 @@
 use super::*;
 
-#[cfg(unix)]
+use std::sync::atomic::Ordering;
+
+const KEY: &str = "0123456789ab-01234567";
+
+fn open(native: &Path, key: &str) -> (Workspace, Opened) {
+    Workspace::open(native, key, &tool::Cancellation::default(), &|| {}).unwrap()
+}
+
+fn parts() -> KeyParts<'static> {
+    KeyParts {
+        revision: "0123456789abcdef0123",
+        signed_sdk: "index",
+        route: "prebuilt",
+        target: "client",
+        platform: "linux",
+        rust_target: "x86_64-unknown-linux-gnu",
+        mixins_from_source: false,
+    }
+}
+
 #[test]
-#[ignore = "daily"]
-fn an_escaped_worker_keeps_only_its_old_writable_paths() {
-    use std::{
-        io::Write,
-        os::unix::process::CommandExt,
-        process::{Command, Stdio},
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let mut first = Workspace::new(dir.path()).unwrap();
-    let paths = |root: &Path| {
-        [
-            root.join("cargo/writer"),
-            root.join("target/writer"),
-            root.join("tmp/writer"),
-        ]
-    };
-    let first_paths = paths(first.path());
-    let mut command = Command::new("/bin/sh");
-    command.args(["-ec", r#"read done; printf old > "$CARGO_HOME/writer"; printf old > "$CARGO_TARGET_DIR/writer"; printf old > "$TMPDIR/writer""#]).stdin(Stdio::piped());
-    first.isolate(&mut command).unwrap();
-    // SAFETY: setsid is async-signal-safe and this child was not made a process group leader.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() < 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        });
+fn the_kept_folder_is_named_by_the_game_build_and_what_built_it() {
+    let same = key(&parts());
+    assert_eq!(same, key(&parts()));
+    assert!(same.starts_with("0123456789ab-"));
+    assert_eq!(same.len(), KEY_LENGTH);
+    let others = [
+        KeyParts {
+            revision: "ffffffffffff",
+            ..parts()
+        },
+        KeyParts {
+            signed_sdk: "other",
+            ..parts()
+        },
+        KeyParts {
+            route: "prebuilt-api",
+            ..parts()
+        },
+        KeyParts {
+            target: "server",
+            ..parts()
+        },
+        KeyParts {
+            platform: "windows",
+            ..parts()
+        },
+        KeyParts {
+            rust_target: "aarch64-apple-darwin",
+            ..parts()
+        },
+        KeyParts {
+            mixins_from_source: true,
+            ..parts()
+        },
+    ];
+    for other in &others {
+        assert_ne!(key(other), same);
     }
-    first.allow_worker();
-    let mut old = command.spawn().unwrap();
+}
+
+#[test]
+fn a_second_open_reuses_the_folder_and_gives_a_fresh_tmp() {
+    let native = tempfile::tempdir().unwrap();
+    let (first, opened) = open(native.path(), KEY);
+    assert_eq!(opened, Opened::Fresh);
+    first
+        .isolate(&mut std::process::Command::new("sdk-tool"))
+        .unwrap();
+    fs::write(first.path().join("target/x"), "built").unwrap();
+    fs::write(first.path().join("cargo/y"), "fetched").unwrap();
+    fs::write(first.path().join("tmp/z"), "scratch").unwrap();
+    let kept = first.path().to_owned();
     drop(first);
-    let retry = Workspace::new(dir.path()).unwrap();
-    retry.isolate(&mut Command::new("/bin/sh")).unwrap();
-    let retry_paths = paths(retry.path());
-    for path in &retry_paths {
-        fs::write(path, "new").unwrap();
-    }
-    old.stdin.take().unwrap().write_all(b"continue\n").unwrap();
-    assert!(old.wait().unwrap().success());
-    for (old, new) in first_paths.iter().zip(&retry_paths) {
-        assert_ne!(old, new);
-        assert_eq!(fs::read_to_string(old).unwrap(), "old");
-        assert_eq!(fs::read_to_string(new).unwrap(), "new");
-    }
+    let (second, opened) = open(native.path(), KEY);
+    assert_eq!(opened, Opened::Reused);
+    assert_eq!(second.path(), kept);
+    assert_eq!(fs::read(kept.join("target/x")).unwrap(), b"built");
+    assert_eq!(fs::read(kept.join("cargo/y")).unwrap(), b"fetched");
+    assert_eq!(fs::read_dir(kept.join("tmp")).unwrap().count(), 0);
+}
+
+#[test]
+fn an_unproved_worker_sets_the_folder_aside_and_starts_clean() {
+    let native = tempfile::tempdir().unwrap();
+    let (mut first, _) = open(native.path(), KEY);
+    fs::write(first.path().join("old"), "from the last build").unwrap();
+    first.allow_worker().unwrap();
+    let kept = first.path().to_owned();
+    drop(first);
+    let (second, opened) = open(native.path(), KEY);
+    let Opened::SetAside(aside) = opened else {
+        panic!("{opened:?}");
+    };
+    assert!(aside
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with(ATTEMPT_PREFIX));
+    assert_eq!(fs::read(aside.join("old")).unwrap(), b"from the last build");
+    assert_eq!(second.path(), kept);
+    assert!(!kept.join("old").exists() && !kept.join(WORKER).exists());
+    // This launcher can't prove the old tree gone, so Storage must not take it for a leftover.
+    assert!(!attempt_owner::gone(&aside));
+}
+
+#[test]
+fn a_proved_worker_leaves_the_folder_for_reuse() {
+    let native = tempfile::tempdir().unwrap();
+    let (mut first, _) = open(native.path(), KEY);
+    first.allow_worker().unwrap();
+    first.worker_finished().unwrap();
+    drop(first);
+    assert_eq!(open(native.path(), KEY).1, Opened::Reused);
+}
+
+#[test]
+fn a_second_open_waits_for_the_lock_and_says_so() {
+    let native = tempfile::tempdir().unwrap();
+    let (held, _) = open(native.path(), KEY);
+    let stopped = tool::Cancellation::default();
+    let said = std::sync::atomic::AtomicUsize::new(0);
+    let waiter = std::thread::scope(|scope| {
+        let stop = stopped.clone();
+        let canceller = scope.spawn(|| {
+            while said.load(Ordering::SeqCst) == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            stop.stop();
+        });
+        let result = Workspace::open(native.path(), KEY, &stopped, &|| {
+            said.fetch_add(1, Ordering::SeqCst);
+        });
+        canceller.join().unwrap();
+        result
+    });
+    assert_eq!(said.load(Ordering::SeqCst), 1);
+    assert_eq!(waiter.err().unwrap(), super::super::CANCELLED);
+    drop(held);
+    assert_eq!(open(native.path(), KEY).1, Opened::Reused);
+}
+
+#[test]
+fn the_mods_folder_path_is_stable_per_profile() {
+    let native = tempfile::tempdir().unwrap();
+    let (workspace, _) = open(native.path(), KEY);
+    let one = workspace.mods(Path::new("/profiles/one"));
+    assert_eq!(one, workspace.mods(Path::new("/profiles/one")));
+    assert_ne!(one, workspace.mods(Path::new("/profiles/two")));
+    assert!(one.starts_with(workspace.path()));
 }
 
 #[test]
 fn writable_sdk_slices_do_not_share_the_cached_bytes() {
     let dir = tempfile::tempdir().unwrap();
-    let stage = Workspace::new(dir.path()).unwrap();
+    let stage = Workspace::scratch(dir.path(), "scratch");
     let cached = Package::at(&dir.path().join("cache"));
     fs::create_dir_all(&cached.runtime).unwrap();
     fs::write(cached.runtime.join("input"), b"original").unwrap();
@@ -65,7 +168,7 @@ fn writable_sdk_slices_do_not_share_the_cached_bytes() {
 #[test]
 fn private_sdk_slices_keep_each_file_s_modified_time() {
     let dir = tempfile::tempdir().unwrap();
-    let stage = Workspace::new(dir.path()).unwrap();
+    let stage = Workspace::scratch(dir.path(), "scratch");
     let cached = Package::at(&dir.path().join("cache"));
     fs::create_dir_all(cached.api.join("deps")).unwrap();
     let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
@@ -97,7 +200,7 @@ fn private_sdk_slices_keep_each_file_s_modified_time() {
 #[test]
 fn registry_library_aliases_keep_their_exact_names_and_bytes_inside_private_roots() {
     let dir = tempfile::tempdir().unwrap();
-    let stage = Workspace::new(dir.path()).unwrap();
+    let stage = Workspace::scratch(dir.path(), "scratch");
     let root = stage.path();
     let package = Package::at(&root.join("package"));
     let rust = crate::rust_toolchain::Toolchain {
@@ -205,7 +308,7 @@ fn registry_library_aliases_keep_their_exact_names_and_bytes_inside_private_root
 #[test]
 fn an_sdk_can_only_supply_its_own_files_and_the_exact_requested_mods() {
     let dir = tempfile::tempdir().unwrap();
-    let stage = Workspace::new(dir.path()).unwrap();
+    let stage = Workspace::scratch(dir.path(), "scratch");
     let package = Package::at(&stage.path().join("package"));
     let rust = crate::rust_toolchain::Toolchain {
         dir: dir.path().join("rust"),
@@ -314,7 +417,7 @@ fn an_sdk_can_only_supply_its_own_files_and_the_exact_requested_mods() {
 fn a_library_names_the_identities_of_the_mods_it_links() {
     use sunrise_launcher_smod::index::library_identity::library_identity;
     let dir = tempfile::tempdir().unwrap();
-    let stage = Workspace::new(dir.path()).unwrap();
+    let stage = Workspace::scratch(dir.path(), "scratch");
     let package = Package::at(&stage.path().join("package"));
     let rust = crate::rust_toolchain::Toolchain {
         dir: dir.path().join("rust"),
@@ -435,11 +538,11 @@ fn a_library_names_the_identities_of_the_mods_it_links() {
 fn a_build_too_deep_for_windows_is_found_before_it_starts() {
     let home = |user: &str| {
         std::path::PathBuf::from(format!(
-            r"C:\Users\{user}\AppData\Roaming\sunrise\launcher\native\.nb-a1B2c3"
+            r"C:\Users\{user}\AppData\Roaming\sunrise\launcher\native"
         ))
     };
-    // #396's player, eight letters: 265 characters in the old folders, 232 now.
+    // #396's player, eight letters, still has room beside the kept folder's longer path.
     assert_eq!(too_deep(&home("abcdefgh")), None);
-    assert_eq!(too_deep(&home(&"u".repeat(35))), None);
-    assert_eq!(too_deep(&home(&"u".repeat(36))), Some(260));
+    assert_eq!(too_deep(&home(&"u".repeat(9))), None);
+    assert_eq!(too_deep(&home(&"u".repeat(10))), Some(260));
 }

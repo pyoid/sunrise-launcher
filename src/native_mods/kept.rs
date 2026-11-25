@@ -228,8 +228,12 @@ impl Kept {
                     return Err(invalid());
                 }
                 let to = folder.join(name);
-                // Never over a file the attempt has already: kept entries don't overlap.
+                // Never over a file the attempt has already: kept entries don't overlap. A build
+                // folder kept from the last build holds the same bytes already: nothing to copy.
                 if fs::symlink_metadata(&to).is_ok() {
+                    if sha256_file(&to).is_ok_and(|have| have == *sha256) {
+                        continue;
+                    }
                     return Err(invalid());
                 }
                 copied.push(to.clone());
