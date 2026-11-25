@@ -3,14 +3,18 @@
 //! The SDK tool already reuses a mod's library while its inputs are unchanged: in its build
 //! folder (`prebuilt-build/api-<key>` or `rustc-<key>`) each library sits beside a `.fingerprint`
 //! of the mod's source, entry and linked libraries. Every attempt runs in a fresh private
-//! workspace ([`super::workspace`]), so that folder always started empty and every mod compiled
-//! again. Tool contract 2 has no way to hand it a library, so this is done from the launcher.
+//! workspace ([`super::workspace`]); before the kept build folder that folder always started empty
+//! and every mod compiled again. Tool contract 2 has no way to hand it a library, so this is
+//! done from the launcher.
 //!
 //! - Only the launcher writes the store, after [`super::workspace::Workspace::verify_outputs`],
 //!   and only for a mod library whose bytes it verified there (`Library`). With it go the two
 //!   files the tool needs to see it as up to date: its fingerprint and, on Windows, its import
-//!   library. The whole-set patch library is never kept. Nothing of a registry-route build is
-//!   kept: its build scripts and proc macros could have written to other outputs.
+//!   library. The whole-set patch library is never kept. A registry-route build's own outputs
+//!   are not copied into this store, because the kept build folder (`native/prebuilt-build/<key>`,
+//!   shared by every profile on a game build) keeps them between builds; this supersedes the
+//!   earlier rule that nothing of a registry-route build is kept. `verify_outputs` still checks
+//!   every library before it is installed.
 //! - The store is outside every workspace. A build gets fresh copies, never a path into it or a
 //!   link, and each copy's SHA-256 is checked as it is made. Anything missing, changed or linked
 //!   is a miss: that mod compiles as before.
