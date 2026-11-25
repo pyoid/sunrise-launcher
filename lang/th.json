@@ -1954,5 +1954,6 @@
   "The SDK files in the cache no longer match their checksums. Clear the build files on the Storage page, then build again.": "The SDK files in the cache no longer match their checksums. Clear the build files on the Storage page, then build again.",
   "This SDK's native build tool is too old for this launcher (it speaks contract {tool}, the launcher {launcher}): install a newer version of the game build.": "This SDK's native build tool is too old for this launcher (it speaks contract {tool}, the launcher {launcher}): install a newer version of the game build.",
   "This launcher and this SDK's native build tool speak different contracts, and the tool didn't say which is older: update the launcher, or install a newer version of the game build.": "This launcher and this SDK's native build tool speak different contracts, and the tool didn't say which is older: update the launcher, or install a newer version of the game build.",
-  "SDK tool first message after {ms} ms (start, layout and staging)": "SDK tool first message after {ms} ms (start, layout and staging)"
+  "SDK tool first message after {ms} ms (start, layout and staging)": "SDK tool first message after {ms} ms (start, layout and staging)",
+  "Old build files from an earlier launcher are kept until the launcher can prove no build still uses them. They are removed on the next cleanup once it can.": "Old build files from an earlier launcher are kept until the launcher can prove no build still uses them. They are removed on the next cleanup once it can."
 }
