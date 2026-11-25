@@ -1,5 +1,10 @@
 //! The kept build folder of one game build: SDK inputs and the writable paths of a native compile.
-use super::{attempt_owner, sdk_cache::Package, tool, Path};
+use super::{
+    attempt_owner,
+    links::{link_or_copy, Placed},
+    sdk_cache::Package,
+    tool, Path,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
@@ -239,28 +244,64 @@ impl Workspace {
             .0
     }
 
-    /// Copy the installed SDK inputs, never giving a compiler links into the shared cache.
-    pub(super) fn package(&self, package: &Package) -> io::Result<Package> {
-        let root = self.path().join("package");
+    /// Lays the SDK's slices (`from`, kept in the shared cache) out in this folder, once: by hard
+    /// links where the file system allows, else copies, and read-only, so a build script can't
+    /// change a cached file by accident. Each later build only checks every file's size and
+    /// modified time against what was laid out, and lays the package out again, with a line to
+    /// `log`, when one differs. A developer's own SDK (no `signed_sdk`) is laid out each time.
+    pub(super) fn lay_out_package(
+        &self,
+        from: &Package,
+        signed_sdk: Option<&str>,
+        log: &dyn Fn(&str),
+    ) -> io::Result<Package> {
+        let root = self.dir.join("package");
+        let private = Package::at(&root);
+        let stamp = self.dir.join("package.stamp");
+        let laid = fs::read(&stamp)
+            .ok()
+            .and_then(|text| serde_json::from_slice::<Laid>(&text).ok());
+        if let (Some(laid), Some(source)) = (&laid, signed_sdk) {
+            if laid.source == source {
+                if listing(&root).is_ok_and(|now| now == laid.files) {
+                    return Ok(private);
+                }
+                log("The SDK files in this build folder changed: laying them out again");
+            }
+        }
+        // Never current while it is being laid out.
+        match fs::remove_file(&stamp) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
         match fs::remove_dir_all(&root) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
             _ => {}
         }
         fs::create_dir(&root)?;
-        let private = Package::at(&root);
         for (from, to) in [
-            (&package.runtime, &private.runtime),
-            (&package.api, &private.api),
-            (&package.engine, &private.engine),
+            (&from.runtime, &private.runtime),
+            (&from.api, &private.api),
+            (&from.engine, &private.engine),
         ] {
             match fs::symlink_metadata(from) {
                 Ok(meta) if meta.is_dir() && !crate::native_cache::linked(&meta) => {
-                    copy_slice(from, to)?;
+                    place_slice(from, to)?;
                 }
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {}
                 Err(err) => return Err(err),
                 Ok(_) => return Err(invalid()),
             }
+        }
+        if let Some(source) = signed_sdk {
+            let laid = Laid {
+                source: source.to_owned(),
+                files: listing(&root)?,
+            };
+            fs::write(
+                &stamp,
+                serde_json::to_vec(&laid).expect("a stamp serializes"),
+            )?;
         }
         Ok(private)
     }
@@ -485,7 +526,52 @@ impl Workspace {
     }
 }
 
-fn copy_slice(from: &Path, to: &Path) -> io::Result<()> {
+/// Every file under `dir`, `/`-separated relative to it, with its size and modified time.
+fn listing(dir: &Path) -> io::Result<BTreeMap<String, (u64, std::time::SystemTime)>> {
+    fn walk(
+        root: &Path,
+        dir: &Path,
+        out: &mut BTreeMap<String, (u64, std::time::SystemTime)>,
+    ) -> io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let path = entry?.path();
+            let meta = fs::symlink_metadata(&path)?;
+            if crate::native_cache::linked(&meta) {
+                return Err(invalid());
+            } else if meta.is_dir() {
+                walk(root, &path, out)?;
+            } else if meta.is_file() {
+                let name = path
+                    .strip_prefix(root)
+                    .expect("under its root")
+                    .components()
+                    .map(|part| part.as_os_str().to_str())
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(invalid)?
+                    .join("/");
+                out.insert(name, (meta.len(), meta.modified()?));
+            } else {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
+    let mut out = BTreeMap::new();
+    walk(dir, dir, &mut out)?;
+    Ok(out)
+}
+
+/// What [`Workspace::lay_out_package`] laid out, and from which signed SDK.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Laid {
+    source: String,
+    files: BTreeMap<String, (u64, std::time::SystemTime)>,
+}
+
+/// Places the files of the slice `from` at `to`, linked or copied, each read-only. The tool names
+/// its build folder from each slice file's path, length and modified time (`kept_build`): a
+/// link keeps the time, and a copy gets it set back, or no kept library would be found again.
+fn place_slice(from: &Path, to: &Path) -> io::Result<()> {
     fs::create_dir(to)?;
     for entry in fs::read_dir(from)? {
         let entry = entry?;
@@ -495,13 +581,14 @@ fn copy_slice(from: &Path, to: &Path) -> io::Result<()> {
         }
         let to = to.join(entry.file_name());
         if meta.is_dir() {
-            copy_slice(&entry.path(), &to)?;
+            place_slice(&entry.path(), &to)?;
         } else if meta.is_file() {
-            crate::preparer::clone_or_copy(&entry.path(), &to)?;
-            // The tool names its build folder from each slice file's path, length and modified
-            // time (`kept_build`). A copy stamped now (Linux's copy and clone) would name another
-            // folder every attempt, and no kept library would ever be found there.
-            times_handle(&to)?.set_modified(meta.modified()?)?;
+            if link_or_copy(&entry.path(), &to)? == Placed::Copied {
+                times_handle(&to)?.set_modified(meta.modified()?)?;
+            }
+            let mut permissions = fs::metadata(&to)?.permissions();
+            permissions.set_readonly(true);
+            fs::set_permissions(&to, permissions)?;
         } else {
             return Err(invalid());
         }
