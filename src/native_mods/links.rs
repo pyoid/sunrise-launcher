@@ -35,6 +35,10 @@ pub(super) fn link_or_copy(from: &Path, to: &Path) -> io::Result<Placed> {
 /// package's file too (the package's layout check looks at sizes and times, not the flag).
 pub(super) fn remove_file(path: &Path) -> io::Result<()> {
     #[cfg(windows)]
+    #[expect(
+        clippy::permissions_set_readonly_false,
+        reason = "Windows only: clears FILE_ATTRIBUTE_READONLY so the file can be removed; no Unix mode bits involved"
+    )]
     if let Ok(meta) = fs::symlink_metadata(path) {
         if meta.is_file() && meta.permissions().readonly() {
             let mut permissions = meta.permissions();
