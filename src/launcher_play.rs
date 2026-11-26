@@ -239,7 +239,8 @@ impl Launcher {
         let tx = self.tx.clone();
         // The checks may download the server jar, so they run on the thread too.
         std::thread::spawn(move || {
-            let log = |line| {
+            let log = |line: String| {
+                sunrise_launcher::launcher_log::line(format!("Preparing: {line}"));
                 let _ = tx.send(Msg::Line(Job::Prepare, line));
             };
             let result = (|| {

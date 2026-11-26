@@ -572,10 +572,6 @@ impl Launcher {
                         }
                     }
                     if job == Job::Prepare {
-                        // The one place every window preparation's lines pass (the Play path,
-                        // the preparer's own output and a build switch), so launcher.log shows
-                        // where a long preparation is when the window says only "Preparing…".
-                        sunrise_launcher::launcher_log::line(format!("Preparing: {line}"));
                         self.follow_switch_preparation();
                     }
                     // The MCP server keeps its own server's log; the launcher's are the preparer's
