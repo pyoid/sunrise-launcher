@@ -1,6 +1,7 @@
 //! Xmilon's preview and creation form, scoped to Sunrise profiles. Saving uses the same
 //! instance creation/copy transaction as the launcher; the dialog doesn't write game files.
 use super::*;
+use crate::glass_instance::no_build_text;
 use crate::{
     frame::{button, primary, Reach},
     instances_page::InstanceDialog,
@@ -231,9 +232,14 @@ impl Launcher {
                     }))
                 });
             }
+            let list_failed = matches!(self.releases, Load::Failed(_));
             let hint = match channel {
-                Channel::Stable if !self.stable_available() => Some(tr("No Stable build yet.")),
-                Channel::Dev if tags.is_empty() => Some(tr("No Dev build yet.")),
+                Channel::Stable if !self.stable_available() => {
+                    Some(no_build_text(list_failed, tr("No Stable build yet.")))
+                }
+                Channel::Dev if tags.is_empty() => {
+                    Some(no_build_text(list_failed, tr("No Dev build yet.")))
+                }
                 _ => None,
             };
             let mut versions = div()

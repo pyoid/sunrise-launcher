@@ -11,6 +11,16 @@ use sunrise_launcher::{
     managed_play::{display_active, Active},
 };
 
+/// What a channel with no build says: that the list couldn't be fetched when that is why
+/// there is none, rather than claiming the channel has no build.
+pub(crate) fn no_build_text(list_failed: bool, no_build: &str) -> &str {
+    if list_failed {
+        tr("Couldn't reach the build list.")
+    } else {
+        no_build
+    }
+}
+
 impl Launcher {
     /// Queue the saved profile's Play target, not the former dialog draft.
     pub(super) fn profile_creation_download(&self, saved: &instances::Instance) -> Option<Release> {
@@ -221,6 +231,18 @@ pub(crate) fn native_base(tag: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_channel_with_no_build_blames_the_list_only_when_it_could_not_be_fetched() {
+        assert_eq!(
+            no_build_text(true, tr("No Dev build yet.")),
+            "Couldn't reach the build list."
+        );
+        assert_eq!(
+            no_build_text(false, tr("No Dev build yet.")),
+            "No Dev build yet."
+        );
+    }
 
     #[test]
     fn home_offers_the_update_to_the_committed_older_profile_even_after_it_is_cached() {

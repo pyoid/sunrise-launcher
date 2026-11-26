@@ -1220,6 +1220,7 @@ impl Launcher {
                 )
         };
         use instances::Channel;
+        let list_failed = matches!(self.releases, Load::Failed(_));
         let mut list = div().flex().flex_col().gap(px(2.));
         for (id, channel, unavailable) in [
             (
@@ -1263,6 +1264,7 @@ impl Launcher {
             } else {
                 unavailable
             };
+            let unavailable = crate::glass_instance::no_build_text(list_failed, unavailable);
             list = list.child(
                 option(
                     id,
