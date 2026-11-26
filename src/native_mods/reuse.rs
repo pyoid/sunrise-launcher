@@ -502,6 +502,16 @@ fn kept_pins(
     .ok()
 }
 
+/// The build id a request compiles against, from what is kept: a release's is fetched by the
+/// planner, never by a lookup.
+fn kept_revision(base: &str, built_on: Option<&About>, developer: bool) -> Option<String> {
+    match built_on {
+        Some(about) => Some(about.sunrise.clone()),
+        None if developer => crate::developer_install::revision(base).ok(),
+        None => sdk_cache::kept_build_of(base),
+    }
+}
+
 /// `request`'s version and plan inputs, as `pipeline` works them out, from `requested` (the
 /// mods' private copies, which take their pins as planning gives them). None when planning
 /// would need anything not on disk, or would stop.
@@ -534,12 +544,7 @@ fn derive(request: &Request<'_>, requested: &[Bundle]) -> Option<Derived> {
         .collect::<Option<Vec<_>>>()?;
     let origin = built_on.map_or(base, |about| about.base.as_str());
     let developer = crate::developer_install::is_developer(origin);
-    // Only what is kept: a release's build id is fetched by the planner, never by a lookup.
-    let revision = match built_on {
-        Some(about) => about.sunrise.clone(),
-        None if developer => crate::developer_install::revision(base).ok()?,
-        None => sdk_cache::kept_build_of(base)?,
-    };
+    let revision = kept_revision(base, built_on, developer)?;
     let sdk = match developer {
         true if mismatch(&mods, &revision).is_some() => return None,
         true => None,
