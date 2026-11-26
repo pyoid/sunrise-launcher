@@ -132,10 +132,8 @@ fn a_symlink_in_the_middle_of_the_tree_is_refused_by_every_worker_count() {
     std::os::unix::fs::symlink(temp.path().join("Alpha.txt"), &link).unwrap();
     let expected = at(&link, io::ErrorKind::InvalidData.into());
     for workers in [1, 2] {
-        assert_eq!(
-            tree_with_workers(temp.path(), false, workers, None),
-            Err(expected.clone())
-        );
+        let error = tree_with_workers(temp.path(), false, workers, None).unwrap_err();
+        assert_eq!(error.to_string(), expected);
     }
 }
 
