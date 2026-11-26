@@ -1,5 +1,6 @@
 //! Resolve the mixins tool pins of native projects before handing them to an SDK's tool.
 use super::{sdk_cache, Bundle, Failed, MIXINS_REV, NATIVE_MANIFEST};
+use crate::i18n::trf;
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
@@ -93,7 +94,11 @@ fn resolve(
                                 refusal,
                                 mod_id: Some(bundle.manifest.id.clone()),
                             },
-                            other => format!("{}: could not resolve [native] mixins: {other}", bundle.manifest.id).into(),
+                            other => trf(
+                                "{id}: could not resolve [native] mixins: {error}",
+                                &[("id", &bundle.manifest.id), ("error", &other.to_string())],
+                            )
+                            .into(),
                         })?;
                     Ok(entry.insert(pin).clone())
                 }
@@ -122,7 +127,10 @@ pub(super) fn for_key(
                 .map(|pin| date(pin).map(|when| (when, pin)))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| {
-                    format!("Can't tell which of the mods' horizon-mixins revisions is newest: {e}")
+                    trf(
+                        "Can't tell which of the mods' horizon-mixins revisions is newest: {error}",
+                        &[("error", &e.to_string())],
+                    )
                 })
                 .map(|dated| {
                     dated

@@ -29,7 +29,10 @@ pub fn jar_urls(jars: &[&JarRef]) -> Result<BTreeMap<String, String>, String> {
         .map_err(|e| format!("{url}: {}", e.kind()))?;
     let status = response.status();
     if status >= 300 {
-        return Err(format!("{url}: HTTP {status}"));
+        return Err(crate::i18n::trf(
+            "{url}: HTTP {status}",
+            &[("url", url.as_str()), ("status", &status.to_string())],
+        ));
     }
     let text = response.into_string().map_err(|e| format!("{url}: {e}"))?;
     jar_file_urls(serde_json::from_str(&text).map_err(|e| format!("{url}: {e}"))?)
@@ -45,8 +48,12 @@ fn jar_file_urls(found: Value) -> Result<BTreeMap<String, String>, String> {
         hashes: BTreeMap<String, String>,
         url: String,
     }
-    let versions: BTreeMap<String, Version> =
-        serde_json::from_value(found).map_err(|e| format!("Modrinth version files: {e}"))?;
+    let versions: BTreeMap<String, Version> = serde_json::from_value(found).map_err(|e| {
+        crate::i18n::trf(
+            "Modrinth version files: {error}",
+            &[("error", &e.to_string())],
+        )
+    })?;
     Ok(versions
         .into_iter()
         .filter_map(|(hash, version)| {
@@ -68,7 +75,8 @@ pub fn download_jar(url: &str, jar: &JarRef, dest: &Path) -> Result<(), String> 
     let cdn = MODRINTH_CDN
         .trim_start_matches("https://")
         .trim_end_matches('/');
-    let response = crate::net::get_from_hosts(url, &[cdn])?.ok_or("Modrinth jar not found")?;
+    let response = crate::net::get_from_hosts(url, &[cdn])?
+        .ok_or(crate::i18n::tr("Modrinth jar not found"))?;
     let part = dest.with_file_name(format!(".sunrise-download-{}.part", std::process::id()));
     let mut file = fs::File::create(&part).map_err(|e| e.to_string())?;
     let result = (|| {
@@ -76,7 +84,10 @@ pub fn download_jar(url: &str, jar: &JarRef, dest: &Path) -> Result<(), String> 
             .map_err(|e| e.to_string())?;
         let got = format!("{hash:x}");
         if !jar.sha512().eq_ignore_ascii_case(&got) {
-            return Err(format!("SHA-512 {got}, the mod says {}", jar.sha512()));
+            return Err(crate::i18n::trf(
+                "SHA-512 {got}, the mod says {expected}",
+                &[("got", got.as_str()), ("expected", jar.sha512())],
+            ));
         }
         file.sync_all().map_err(|e| e.to_string())?;
         fs::rename(&part, dest).map_err(|e| e.to_string())

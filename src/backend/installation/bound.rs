@@ -57,9 +57,12 @@ impl NightlyReceiptWarning {
     }
 
     pub fn detail(&self) -> String {
-        format!(
-            "Could not save the rolling receipt for {}: {}",
-            self.tag, self.failure.error
+        crate::i18n::trf(
+            "Could not save the rolling receipt for {tag}: {error}",
+            &[
+                ("tag", &self.tag),
+                ("error", &self.failure.error.to_string()),
+            ],
         )
     }
 
@@ -491,7 +494,12 @@ impl GameDownload {
         } else {
             let facts = if let Some(sha) = proof.facts.as_deref() {
                 let bytes = fetch_small_cancellable(&asset_url(&self.source, RELEASE_FILE), stop)?
-                    .ok_or_else(|| format!("{RELEASE_FILE}: signed build facts are missing"))?;
+                    .ok_or_else(|| {
+                        crate::i18n::trf(
+                            "{file}: signed build facts are missing",
+                            &[("file", RELEASE_FILE)],
+                        )
+                    })?;
                 Some((bytes, sha))
             } else {
                 None
