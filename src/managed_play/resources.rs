@@ -1,7 +1,10 @@
 //! Managed Play reads the exact prepared tree saved with its generation. The ordinary
 //! preparation cache remains available for a later Prepare, without changing an active game.
-use super::{artifact, digest_file, optional_bytes, plain_file, require_dir, unsettled};
-use crate::{backend, preparer, process::leases::ProfileHandoff, profile_txn::durable};
+use super::{artifact, digest_file, optional_bytes, plain_file, pool, require_dir, unsettled};
+use crate::{
+    backend, launcher_log, native_mods::Cancellation, preparer, process::leases::ProfileHandoff,
+    profile_txn::durable,
+};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::{
@@ -114,7 +117,7 @@ impl Resources {
         backend::complete_assets_staged(base, handoff);
         check()?;
         let root = backend::version_dir(base);
-        Self::seal(&root, &backend::resources(base), |resources| {
+        Self::seal(&root, &backend::resources(base), stop, |resources| {
             check()?;
             let Some(binary) = preparer::binary(&root) else {
                 return Ok(None);
@@ -166,7 +169,14 @@ impl Resources {
         ] {
             require_dir(dir)?;
         }
-        let actual = artifact::tree(&path, true)?;
+        let actual = logged("Verifying game files", || {
+            Ok(
+                match artifact::tree_with_workers(&path, true, pool::workers(), None)? {
+                    Some((digest, files)) => (Some(digest), files),
+                    None => (None, 0),
+                },
+            )
+        })?;
         if actual != Some(self.primary) {
             return Err(setup_error(&path));
         }
@@ -187,6 +197,18 @@ impl Resources {
     fn seal(
         root: &Path,
         source: &Path,
+        stop: Option<&Cancellation>,
+        accelerator: impl FnOnce(&Path) -> Result<Option<[u8; 32]>, String>,
+    ) -> Result<Self, String> {
+        Self::seal_with(root, source, pool::workers(), stop, accelerator)
+    }
+
+    // The hash pass runs on `workers` threads and joins them before the copy.
+    fn seal_with(
+        root: &Path,
+        source: &Path,
+        workers: usize,
+        stop: Option<&Cancellation>,
         accelerator: impl FnOnce(&Path) -> Result<Option<[u8; 32]>, String>,
     ) -> Result<Self, String> {
         let relative = source.strip_prefix(root).map_err(|_| setup_error(source))?;
@@ -201,7 +223,15 @@ impl Resources {
             require_dir(ancestor)?;
         }
         require_dir(root)?;
-        let Some(primary) = artifact::tree(source, true)? else {
+        let primary = logged("Sealing game files: hashing", || {
+            Ok(
+                match artifact::tree_with_workers(source, true, workers, stop)? {
+                    Some((digest, files)) => (Some(digest), files),
+                    None => (None, 0),
+                },
+            )
+        })?;
+        let Some(primary) = primary else {
             return Err(setup_error(source));
         };
         let parent = parent(root);
@@ -282,6 +312,21 @@ fn key(digest: [u8; 32]) -> String {
     format!("{:x}", sha2::digest::Output::<Sha256>::from(digest))
 }
 
+/// Start and end lines in the launcher log for one pass over a snapshot's files, with how many.
+fn logged<T>(what: &str, run: impl FnOnce() -> Result<(T, usize), String>) -> Result<T, String> {
+    let step = launcher_log::step(what);
+    match run() {
+        Ok((value, files)) => {
+            step.done(format!("{files} files"));
+            Ok(value)
+        }
+        Err(error) => {
+            step.failed(&error);
+            Err(error)
+        }
+    }
+}
+
 pub(super) fn copy_tree(
     source: &Path,
     dest: &Path,
@@ -336,7 +381,7 @@ mod tests {
         fs::create_dir(&source).unwrap();
         fs::write(source.join("sunrise-resources.json"), "{}").unwrap();
         for source in [source, root.join("../prepared")] {
-            assert!(Resources::seal(&root, &source, |_| Ok(None)).is_err());
+            assert!(Resources::seal(&root, &source, None, |_| Ok(None)).is_err());
         }
         assert!(!parent(&root).exists());
     }
@@ -348,13 +393,13 @@ mod tests {
         let source = root.join(".local/prepared");
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join("sunrise-resources.json"), "{}").unwrap();
-        let prepared = Resources::seal(root, &source, |_| Ok(None)).unwrap();
+        let prepared = Resources::seal(root, &source, None, |_| Ok(None)).unwrap();
         let path = prepared.path_at(root);
         for missing in [&path, path.parent().unwrap()] {
             fs::remove_dir_all(missing).unwrap();
             assert_eq!(Resources::current(root).unwrap(), None);
             assert_eq!(
-                Resources::seal(root, &source, |_| Ok(None)).unwrap(),
+                Resources::seal(root, &source, None, |_| Ok(None)).unwrap(),
                 prepared
             );
             assert_eq!(Resources::current(root).unwrap().as_ref(), Some(&prepared));
@@ -374,16 +419,16 @@ mod tests {
         let stamp = source.join("sunrise-prepare.json");
         fs::write(&manifest, "{}").unwrap();
         fs::write(&stamp, r#"{"output_version":7}"#).unwrap();
-        Resources::seal(root, &source, |_| Ok(None)).unwrap();
+        Resources::seal(root, &source, None, |_| Ok(None)).unwrap();
         assert_eq!(Resources::current(root).unwrap(), None);
 
         fs::write(&stamp, r#"{"output_version":8}"#).unwrap();
         fs::write(&manifest, r#"{"profile":"server"}"#).unwrap();
-        Resources::seal(root, &source, |_| Ok(None)).unwrap();
+        Resources::seal(root, &source, None, |_| Ok(None)).unwrap();
         assert_eq!(Resources::current(root).unwrap(), None);
 
         fs::write(&manifest, "{}").unwrap();
-        let full = Resources::seal(root, &source, |_| Ok(None)).unwrap();
+        let full = Resources::seal(root, &source, None, |_| Ok(None)).unwrap();
         assert_eq!(Resources::current(root).unwrap(), Some(full));
     }
 
@@ -396,7 +441,7 @@ mod tests {
         fs::write(source.join("sunrise-resources.json"), "{}").unwrap();
         fs::write(source.join("blocks.json"), "{\"old\": true}").unwrap();
         fs::write(source.join(preparer::DATA_FILE), b"untrusted").unwrap();
-        let prepared = Resources::seal(root, &source, |dir| {
+        let prepared = Resources::seal(root, &source, None, |dir| {
             let data = dir.join(preparer::DATA_FILE);
             assert!(!data.exists());
             fs::write(&data, b"generated from the snapshot").unwrap();
@@ -409,7 +454,7 @@ mod tests {
             "{\"old\": true}"
         );
         assert_eq!(
-            Resources::seal(root, &source, |_| panic!("snapshot reused")).unwrap(),
+            Resources::seal(root, &source, None, |_| panic!("snapshot reused")).unwrap(),
             prepared
         );
         fs::write(source.join("blocks.json"), "{\"new\": true}").unwrap();
@@ -418,7 +463,7 @@ mod tests {
         assert_eq!(Resources::current(root).unwrap(), None);
         Resources::invalidate(root).unwrap();
         assert_eq!(Resources::current(root).unwrap(), None);
-        let changed = Resources::seal(root, &source, |_| Ok(None)).unwrap();
+        let changed = Resources::seal(root, &source, None, |_| Ok(None)).unwrap();
         assert_ne!(prepared.primary, changed.primary);
         assert_eq!(Resources::current(root).unwrap(), Some(changed));
         fs::write(snapshot.join(preparer::DATA_FILE), b"different cache").unwrap();
