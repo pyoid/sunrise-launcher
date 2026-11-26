@@ -8,8 +8,8 @@ use sunrise_launcher::{
     browser::sunrise::{
         install_target, save_build_choice, switch_profile_build_v2, switch_provider_v2,
         BuildChoice, InstallError, InstallHooks, InstallProgress, ProviderSwitchPreview,
-        SwitchDecision, SwitchHooks, SwitchQuestion, Switched, V2Hooks, V2InstallOptions,
-        V2ProviderSwitchHooks, V2SwitchHooks,
+        SwitchDecision, SwitchHooks, SwitchPolicy, SwitchQuestion, Switched, V2Hooks,
+        V2InstallOptions, V2ProviderSwitchHooks, V2SwitchHooks,
     },
     managed_play::{self, Active, FirstBuild, Profile, ReceiptHint},
     profile_txn::Identity,
@@ -63,6 +63,12 @@ struct Running {
     op: sunrise_launcher::launcher_log::Operation,
     /// The player answered its question with Cancel: how it ended says so.
     declined: bool,
+    /// How it treats the player's mods: set when it begins, before any worker can start.
+    policy: SwitchPolicy,
+    /// The policy its worker started with, once it has.
+    started_with: Option<SwitchPolicy>,
+    /// Set by the worker when the policy stopped it.
+    refused: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The share of an install's progress that is its download (`backend::download_cancellable`
@@ -195,6 +201,17 @@ impl Launcher {
     }
 
     pub(crate) fn begin_switch(&mut self, tag: String, choice: Option<BuildChoice>) {
+        self.begin_switch_as(tag, choice, SwitchPolicy::Ask);
+    }
+
+    /// [`Self::begin_switch`] under `policy`, which the switch holds from its first moment: a
+    /// prepared target starts its worker before this returns (review of #616).
+    pub(crate) fn begin_switch_as(
+        &mut self,
+        tag: String,
+        choice: Option<BuildChoice>,
+        policy: SwitchPolicy,
+    ) {
         if self.launch_busy() || self.client.is_some() || self.removing.contains(&tag) {
             return;
         }
@@ -214,6 +231,27 @@ impl Launcher {
         let unplayed_target = self
             .target_version(instance.version.as_ref(), instance.channel)
             .map(String::as_str);
+        // Home's switch never takes that path: its check was for a profile on another build, and
+        // one already on `tag` may have reached it with a wanted mod held off (review of #616).
+        let already_there = self.profile_target(&instance).as_deref() == Some(tag.as_str());
+        if policy == SwitchPolicy::KeepEveryMod
+            && (already_there
+                || can_fast_save_choice(
+                    &instance,
+                    &tag,
+                    unplayed_target,
+                    self.installed.contains(&tag),
+                ))
+        {
+            self.open_notice(
+                trf(
+                    "This profile is already on {build}, so nothing changed.",
+                    &[("build", &build_name(&tag))],
+                ),
+                None,
+            );
+            return;
+        }
         if can_fast_save_choice(
             &instance,
             &tag,
@@ -257,6 +295,9 @@ impl Launcher {
                     let _ = tx.send(Msg::SwitchDetail(text));
                 }
             }),
+            policy,
+            started_with: None,
+            refused: Arc::default(),
         });
         self.switch_log_line(format!("Switching to {tag}: started"));
         self.open_sheet(Sheet::Switching);
@@ -355,6 +396,8 @@ impl Launcher {
             running.stop.clone(),
             running.op.clone(),
         );
+        let (policy, refused) = (running.policy, running.refused.clone());
+        running.started_with = Some(policy);
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             // The steps inside the switch (sealing and checking the game files, the mod set)
@@ -370,6 +413,14 @@ impl Launcher {
                 approve: &|question| {
                     if stop.is_stopped() {
                         return Ok(SwitchDecision::Cancel);
+                    }
+                    if let Some(decision) = policy.answer(question) {
+                        refused.store(true, std::sync::atomic::Ordering::Relaxed);
+                        sunrise_launcher::launcher_log::line(format!(
+                            "Switching to {tag}: stopped before any change, it would leave out {}",
+                            question.wanted_left_out.join(", ")
+                        ));
+                        return Ok(decision);
                     }
                     let (answer, reply) = std::sync::mpsc::channel();
                     tx.send(Msg::SwitchQuestion(Box::new(question.clone()), answer))
@@ -395,6 +446,7 @@ impl Launcher {
                             && reply.recv().unwrap_or(false)
                     }),
                     pin_dir: None,
+                    recover_held: policy.recover_held(),
                 },
             );
             let _ = tx.send(Msg::Switched(instance.home, Box::new(outcome)));
@@ -427,6 +479,13 @@ impl Launcher {
                 "Switching to {tag}: cancel not taken, the change is already being applied"
             ));
         }
+    }
+
+    /// Home's switch to the build the profile's mods need: kept on that build, every held-off
+    /// mod the player had on turned back on, and stopped before any change when the fresh check
+    /// would still leave one out.
+    pub(crate) fn begin_mods_switch(&mut self, tag: String) {
+        self.begin_switch_as(tag, Some(BuildChoice::Keep), SwitchPolicy::KeepEveryMod);
     }
 
     /// A line in the running switch's own log (its dialog's box and launcher.log).
@@ -514,11 +573,20 @@ impl Launcher {
         // cancel and a cancel all say so.
         if let Some(running) = &self.ui.sheets.switching.running {
             let _in = running.op.enter();
-            let ended = switch_ending(&result, running.stop.is_stopped(), running.declined);
+            let refused = running.refused.load(std::sync::atomic::Ordering::Relaxed);
+            let ended = if refused && matches!(result, Ok(Switched::Stayed)) {
+                "stopped before any change, it would have left out wanted mods".to_owned()
+            } else {
+                switch_ending(&result, running.stop.is_stopped(), running.declined)
+            };
             sunrise_launcher::launcher_log::line(format!("Switching to {}: {ended}", running.tag));
         }
         self.pull_switch_log();
         let running = self.ui.sheets.switching.running.take();
+        let refused = running
+            .as_ref()
+            .is_some_and(|run| run.refused.load(std::sync::atomic::Ordering::Relaxed));
+        let refused_build = running.as_ref().map(|run| build_name(&run.tag));
         let stopped = running.as_ref().is_some_and(|run| run.stop.is_stopped());
         let back = running.and_then(|run| run.back);
         let result = shown_outcome(result, stopped);
@@ -547,6 +615,13 @@ impl Launcher {
                     self.close_sheet();
                 }
             }
+            Ok(Switched::Stayed) if refused => self.open_notice(
+                trf(
+                    "Not every mod could be kept on {build}, so nothing changed.",
+                    &[("build", &refused_build.unwrap_or_default())],
+                ),
+                None,
+            ),
             Ok(Switched::Stayed) => {
                 if visible {
                     if let Some(back) = back {
@@ -1488,6 +1563,219 @@ mod tests {
     use super::{
         can_fast_save_choice, install_stage, publish_report, shown_outcome, switch_ending,
     };
+    use crate::sheets::Sheet;
+    use crate::Load;
+
+    /// Runs `test` again in a child process with scratch homes, as the other window tests do:
+    /// false here, true in the child.
+    fn in_scratch_child(test: &str) -> bool {
+        const CHILD: &str = "SUNRISE_SWITCH_WINDOW_TEST";
+        if std::env::var_os(CHILD).is_some() {
+            return true;
+        }
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path();
+        let nowhere = "http://127.0.0.1:9";
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("sheets::switching::tests::{test}")])
+            .env(CHILD, root)
+            // The window runs on a 16 MiB stack (`startup.rs`); a test thread has 2 MiB, too
+            // little for the switch dialog's frame in a debug build.
+            .env("RUST_MIN_STACK", (16 * 1024 * 1024).to_string())
+            .env("SUNRISE_HOME", root.join("game"))
+            .env("SUNRISE_LAUNCHER_HOME", root.join("launcher"))
+            .env("SUNRISE_LAUNCHER_LOCATION_FILE", root.join("location.json"))
+            .env("SUNRISE_NO_KEYCHAIN", "1")
+            .env("SUNRISE_LAUNCHER_NO_SELF_UPDATE", "1")
+            .env("SUNRISE_TELEMETRY_URL", "off")
+            .env("XDG_DATA_HOME", root.join("data"))
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("HTTP_PROXY", nowhere)
+            .env("HTTPS_PROXY", nowhere)
+            .env("ALL_PROXY", nowhere)
+            .env_remove("NO_PROXY")
+            .env_remove("SUNRISE_GITHUB_MIRROR")
+            .env_remove("SUNRISE_LAUNCHER_BENCH")
+            .status()
+            .unwrap();
+        assert!(status.success(), "{test} failed in its child process");
+        false
+    }
+
+    /// The selected profile, as `instances.json` has it now.
+    fn saved_profile(id: &str) -> sunrise_launcher::instances::Instance {
+        sunrise_launcher::instances::list()
+            .into_iter()
+            .find(|instance| instance.id == id)
+            .unwrap()
+    }
+
+    /// A pick of a build that isn't downloaded is kept only once its download and preparation
+    /// have both succeeded: one whose download fails leaves the profile following its channel,
+    /// with nothing saved (review of #616). A download that succeeds can't be faked here: the
+    /// game's releases are checked against the built-in release keys only.
+    #[test]
+    fn a_pick_whose_download_fails_is_not_kept() {
+        if !in_scratch_child("a_pick_whose_download_fails_is_not_kept") {
+            return;
+        }
+        // Its download thread's messages reach the window: let the pump's tick read them.
+        crate::wake::UNDER_TEST_SCHEDULER.store(true, std::sync::atomic::Ordering::Relaxed);
+        const TAG: &str = "26.3-0.1.0";
+        let profile = sunrise_launcher::instances::create("Cabin", None).unwrap();
+        let mut settings = sunrise_launcher::backend::Settings::load();
+        settings.instance = Some(profile.id.clone());
+        settings.save().unwrap();
+        let mut app = gpui::TestAppContext::single();
+        let (shell, cx) = app.add_window_view(crate::window_root::Shell::new);
+        let launcher = shell.read_with(cx, |shell, _| shell.launcher());
+        cx.run_until_parked();
+        launcher.update(cx, |l, _| {
+            l.releases = Load::Ready(vec![sunrise_launcher::backend::Release {
+                tag: TAG.into(),
+                name: TAG.into(),
+                body: String::new(),
+                date: "2026-11-20".into(),
+                time: String::new(),
+                published_at: String::new(),
+                asset: Some((
+                    format!("https://github.com/sunrise-org/sunrise/releases/download/{TAG}/sunrise-linux-x86_64.tar.gz"),
+                    1000,
+                )),
+                prerelease: false,
+                nightly: None,
+            }]);
+            // As the picker's Switch does.
+            l.begin_switch(TAG.into(), Some(sunrise_launcher::browser::sunrise::BuildChoice::Keep));
+            assert!(l.ui.sheets.switching.running.is_some(), "the switch began");
+        });
+        assert_eq!(
+            saved_profile(&profile.id).version,
+            None,
+            "nothing is kept while it downloads"
+        );
+        let mut ended = false;
+        for _ in 0..300 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(200));
+            cx.run_until_parked();
+            if launcher.read_with(cx, |l, _| l.ui.sheets.switching.running.is_none()) {
+                ended = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert!(ended, "the failed download ended the switch");
+        assert_eq!(
+            saved_profile(&profile.id).version,
+            None,
+            "a pick whose download failed is not kept: the profile still follows its channel"
+        );
+        assert!(!sunrise_launcher::backend::version_dir(TAG)
+            .join(".installed")
+            .exists());
+    }
+
+    /// Home's switch to a build that is already prepared starts its worker inside
+    /// `begin_switch`: the worker must start with Home's policy, not the default one it had
+    /// before the policy was set (review of #616).
+    #[test]
+    fn homes_switch_to_a_prepared_build_starts_its_worker_with_homes_policy() {
+        if !in_scratch_child("homes_switch_to_a_prepared_build_starts_its_worker_with_homes_policy")
+        {
+            return;
+        }
+        const TAG: &str = "26.3-0.1.0";
+        let build = sunrise_launcher::backend::version_dir(TAG);
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join(".installed"), []).unwrap();
+        let resources = sunrise_launcher::backend::resources(TAG);
+        std::fs::create_dir_all(&resources).unwrap();
+        std::fs::write(resources.join("sunrise-resources.json"), "{}").unwrap();
+        assert!(sunrise_launcher::backend::check_prepared(TAG));
+        // The profile is kept on another installed build: a switch to `TAG` is a real one, not
+        // the saved choice alone that a profile already on its target gets.
+        const OTHER: &str = "26.3-0.0.9";
+        let other = sunrise_launcher::backend::version_dir(OTHER);
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join(".installed"), []).unwrap();
+        let profile = sunrise_launcher::instances::create("Cabin", None).unwrap();
+        sunrise_launcher::browser::sunrise::save_build_choice(
+            &profile.id,
+            OTHER,
+            sunrise_launcher::browser::sunrise::BuildChoice::Keep,
+        )
+        .unwrap();
+        let mut settings = sunrise_launcher::backend::Settings::load();
+        settings.instance = Some(profile.id.clone());
+        settings.save().unwrap();
+        let mut app = gpui::TestAppContext::single();
+        let (shell, cx) = app.add_window_view(crate::window_root::Shell::new);
+        let launcher = shell.read_with(cx, |shell, _| shell.launcher());
+        cx.run_until_parked();
+        let started = launcher.update(cx, |l, _| {
+            l.begin_mods_switch(TAG.into());
+            l.ui.sheets
+                .switching
+                .running
+                .as_ref()
+                .map(|running| (running.policy, running.started_with))
+        });
+        assert_eq!(
+            started,
+            Some((
+                sunrise_launcher::browser::sunrise::SwitchPolicy::KeepEveryMod,
+                Some(sunrise_launcher::browser::sunrise::SwitchPolicy::KeepEveryMod)
+            )),
+            "the worker started, and with Home's policy"
+        );
+    }
+    /// Home's switch to the build a following profile already plays saves no pin: Home worked it
+    /// out for the profile on another build, and the profile may have reached this one with a
+    /// wanted mod held off (review of #616). Its fast path is the picker's alone.
+    #[test]
+    fn homes_switch_to_the_build_a_profile_already_plays_saves_nothing() {
+        if !in_scratch_child("homes_switch_to_the_build_a_profile_already_plays_saves_nothing") {
+            return;
+        }
+        const TAG: &str = "26.3-0.1.0";
+        let build = sunrise_launcher::backend::version_dir(TAG);
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join(".installed"), []).unwrap();
+        let profile = sunrise_launcher::instances::create("Cabin", None).unwrap();
+        let mut settings = sunrise_launcher::backend::Settings::load();
+        settings.instance = Some(profile.id.clone());
+        settings.save().unwrap();
+        let mut app = gpui::TestAppContext::single();
+        let (shell, cx) = app.add_window_view(crate::window_root::Shell::new);
+        let launcher = shell.read_with(cx, |shell, _| shell.launcher());
+        cx.run_until_parked();
+        launcher.update(cx, |l, _| {
+            l.refresh_installed();
+            let instance = l.selected_instance().cloned().unwrap();
+            let tag = l
+                .profile_target(&instance)
+                .expect("the following profile goes to the installed build");
+            let unplayed = l.target_version(None, instance.channel).cloned();
+            assert!(
+                can_fast_save_choice(&instance, &tag, unplayed.as_deref(), true),
+                "the picker would only save its choice here"
+            );
+            l.begin_switch_as(
+                tag,
+                Some(sunrise_launcher::browser::sunrise::BuildChoice::Keep),
+                sunrise_launcher::browser::sunrise::SwitchPolicy::KeepEveryMod,
+            );
+            assert!(l.ui.sheets.switching.running.is_none(), "no switch began");
+            assert_eq!(l.ui.sheet, Some(Sheet::Notice), "Home's switch says why");
+        });
+        assert_eq!(
+            saved_profile(&profile.id).version,
+            None,
+            "no pin was saved: the profile still follows its channel"
+        );
+    }
+
     use sunrise_launcher::browser::sunrise::{InstallProgress, Switched};
 
     #[test]
