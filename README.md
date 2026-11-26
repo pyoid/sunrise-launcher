@@ -56,7 +56,7 @@ The opening, then Play ([clip](docs/opening.webm)):
 
 ## What it does
 
-- **Channels & game builds**: each profile follows Stable, Nightly, or opt-in Dev builds of
+- **Channels & game builds**: each profile follows Stable, Nightly or Dev builds of
   `sunrise-org/sunrise`. Choose or switch a profile's build beside **Play**, and manage installed
   builds in **Settings › Storage** (removing builds, cleaning up automatic downloads, and
   **Import a game build…**, which installs a local `sunrise-client` or zip as
@@ -326,7 +326,7 @@ pagination links, a full page prompts a request for the next page. When both fai
 answer is used, else the error names both. Release files themselves come from their download
 links, which that limit doesn't cover.
 
-Profiles start on Stable. Choose **Dev** in a profile to follow signed Dev builds; the launcher
+New profiles start on Dev; profiles made earlier keep their channel. Choose **Stable** or **Nightly** in a profile to follow those instead. Dev builds are signed; the launcher
 can still play a build already installed after the release is pruned. To install a specific Dev
 build, use `sunrise-launcher install dev-<date>-<commit>`. Its title and signature must both name
 the exact build. Dev is distinct from a local unsigned `developer-install`.
