@@ -4148,7 +4148,9 @@ fn releases_and_updates_with_sdk(
             };
             let versions = installed();
             updates.sunrise = channel
-                .and_then(|c| sunrise_update(&static_offers, &versions, c))
+                .and_then(|c| {
+                    sunrise_update(&static_offers, &versions, c.following(&static_offers))
+                })
                 .cloned();
             on_releases(Ok(static_offers));
             if let Some(target) = target.filter(|_| has_sdk) {
@@ -4168,7 +4170,7 @@ fn releases_and_updates_with_sdk(
     if let (Some((mut candidates, target)), Some(versions)) = (pending_sdk, installed_versions) {
         if resolve_sdk(&mut candidates, target) {
             updates.sunrise = channel
-                .and_then(|c| sunrise_update(&candidates, &versions, c))
+                .and_then(|c| sunrise_update(&candidates, &versions, c.following(&candidates)))
                 .cloned();
             on_releases(Ok(candidates));
         }
