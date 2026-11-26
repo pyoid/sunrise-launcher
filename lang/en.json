@@ -653,6 +653,7 @@
   "Show output": "Show output",
   "Hide output": "Hide output",
   "Waiting for the compiler's first lines…": "Waiting for the compiler's first lines…",
+  "Every installed build named for these mods ({version}) holds other mods or was changed after it was installed. Remove them, then build again.": "Every installed build named for these mods ({version}) holds other mods or was changed after it was installed. Remove them, then build again.",
   "Discard your changes?": "Discard your changes?",
   "Keep editing": "Keep editing",
   "Discard": "Discard"

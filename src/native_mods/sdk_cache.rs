@@ -374,12 +374,16 @@ pub(super) fn build_folder(commit: &str) -> PathBuf {
     root().join(commit)
 }
 
-/// The index [`index`] keeps for build `commit`, as it is on disk and unchecked: what the fast
-/// path keys a build on (`reuse`), never a reason to trust it. None when none is kept.
-pub(super) fn kept_index(commit: &str) -> Option<Vec<u8>> {
-    super::is_revision(commit)
-        .then(|| fs::read(build_folder(commit).join(INDEX)).ok())
-        .flatten()
+/// The index [`index`] keeps for build `commit`, read as [`index`] reads a kept one; None when
+/// none is kept or it doesn't read. Nothing is fetched: what the fast path (`reuse`) compares
+/// with the digest a build recorded of the index it was planned from.
+pub(super) fn kept(commit: &str) -> Option<Sdk> {
+    if !super::is_revision(commit) {
+        return None;
+    }
+    let dir = build_folder(commit);
+    let bytes = fs::read(dir.join(INDEX)).ok()?;
+    checked(&bytes, commit, dir).ok()
 }
 
 /// Write `bytes` to `path` whole or not at all: beside it first, then renamed into place.

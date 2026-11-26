@@ -53,6 +53,13 @@ mod uses;
 #[cfg(test)]
 pub(crate) static TEST_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+// How many times this thread asked the SDK tool to check mods (`check_all`): what a test of the
+// fast path counts, whatever the build says on the way.
+#[cfg(test)]
+thread_local! {
+    static SDK_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 const PREFIX: &str = "native-";
 // A staging change invalidates both installed builds and patched-source snapshots.
 const STAGING: &str = "area-aware-mixins-input-v1";
@@ -700,7 +707,9 @@ pub fn newer_than(base: &str, installed: &[String]) -> Option<String> {
 /// The installed version `bundles` built on Sunrise `revision` with horizon-mixins `mixins`
 /// become: `native-<7 digits of the revision>-<12 hex digits>`. The two targets' keys never mix:
 /// a server build salts its hash, so it is another version than the client build of the same
-/// mods.
+/// mods. Nor do a set's builds with and without `left_out`: a build leaving mods out salts its
+/// hash with their ids, so it never stands in for the whole set (a whole set's version is the
+/// one launchers before this kept).
 pub fn version_for(
     revision: &str,
     mixins: &str,
@@ -708,6 +717,7 @@ pub fn version_for(
     target: Target,
     platform: Option<&str>,
     bundles: &[Bundle],
+    left_out: &[LeftOut],
 ) -> Result<String, String> {
     let mut hash = Sha256::new();
     let (cargo_profile, configs) = profile.cargo();
@@ -725,6 +735,16 @@ pub fn version_for(
         hash.update([0]);
     }
     hash_bundles(&mut hash, bundles).map_err(|e| e.to_string())?;
+    if !left_out.is_empty() {
+        let mut ids: Vec<&str> = left_out.iter().map(|left| left.id.as_str()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        hash.update(b"left out\0");
+        for id in ids {
+            hash.update(id.as_bytes());
+            hash.update([0]);
+        }
+    }
     let key: String = hash.finalize()[..6]
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -1219,6 +1239,8 @@ fn check_all(
     if ids.is_empty() {
         return Ok(Checks::default());
     }
+    #[cfg(test)]
+    SDK_CHECKS.with(|checks| checks.set(checks.get() + 1));
     let refused = |why: String| sdk_cache::Refusal::Refused {
         build: sdk.shown(),
         why,
@@ -1402,14 +1424,17 @@ fn retry_check_inputs(
         .transpose()
 }
 
-/// Prove both the applicable dispatch graph and the actual Cargo library order.
+/// Prove both the applicable dispatch graph and the actual Cargo library order. Returns the ids
+/// of `mods` in the override-aware dispatch order it proved, and the Cargo order: the build is
+/// given the Cargo order, and a reused build must have been planned with the same dispatch order
+/// too (`reuse`).
 fn resolve_build_dependencies(
     instance: &Path,
     mods: &[Bundle],
     declared: &[Vec<dependencies::Dependency>],
     side: sunrise_launcher_smod::manifest::Side,
     overrides: &dependencies::Overrides,
-) -> Result<dependencies::Resolution, String> {
+) -> Result<(Vec<String>, dependencies::Resolution), String> {
     let settings = sunrise_launcher_smod::mod_list::ModList::load(instance);
     let content: Vec<_> =
         sunrise_launcher_smod::selection::content_packages(instance, &settings.enabled, &[])
@@ -1419,8 +1444,12 @@ fn resolve_build_dependencies(
         .map(|bundle| &bundle.manifest)
         .chain(content.iter().map(|source| &source.package.manifest))
         .collect();
-    dependencies::resolve_manifests(&applicable, side, overrides)
-        .map_err(|error| error.to_string())?;
+    let dispatch = dependencies::resolve_manifests(&applicable, side, overrides)
+        .map_err(|error| error.to_string())?
+        .order
+        .into_iter()
+        .filter_map(|i| mods.get(i).map(|bundle| bundle.manifest.id.clone()))
+        .collect();
 
     // Dispatch overrides cannot make an incomplete or reversed Cargo library graph link.
     let inputs: Vec<_> = mods
@@ -1434,8 +1463,9 @@ fn resolve_build_dependencies(
             dependencies: deps,
         })
         .collect();
-    dependencies::resolve_links(&inputs)
-        .map_err(|error| format!("code link requirements refused: {error}"))
+    let links = dependencies::resolve_links(&inputs)
+        .map_err(|error| format!("code link requirements refused: {error}"))?;
+    Ok((dispatch, links))
 }
 
 /// Which side of a mod's manifest a `target` build reads.
@@ -1568,21 +1598,6 @@ fn pipeline(
     backend::need_prepared(base)?;
     let platform = platform_for_game(base)?;
     fs::create_dir_all(root()).map_err(|e| e.to_string())?;
-    // A set built and installed from these same inputs is used again before any planning.
-    let looking = std::time::Instant::now();
-    let hit = reuse::lookup(&reuse::Request {
-        base,
-        folder,
-        built_on: built_on.as_ref(),
-        platform,
-        profile,
-        target,
-        options: &options,
-    });
-    timed("Looking up the installed build", looking)?;
-    if let Some(hit) = hit {
-        return reuse::reused(hit, profile, target, &options, progress, started);
-    }
     // The mods are copied first: the build and its key use the copy, whatever happens to the
     // folder meanwhile.
     let mut workspace = workspace::Workspace::new(&root()).map_err(|e| e.to_string())?;
@@ -1615,10 +1630,19 @@ fn pipeline(
             ..b
         })
         .collect();
-    // What the fast path keys a set on next time: the copies' files, before `materialize`.
-    let files = (target == Target::Client)
-        .then(|| reuse::files(&requested))
-        .flatten();
+    // A set installed from these same inputs is used again before it is checked (`reuse`).
+    let request = reuse::Request {
+        base,
+        folder,
+        built_on: built_on.as_ref(),
+        platform,
+        profile,
+        target,
+        options: &options,
+    };
+    if let Some(built) = reuse::find(&request, &requested, progress, started)? {
+        return Ok(built);
+    }
     let side = side_of(target);
     let (left_out, mods, declared) = kept_mods(&requested, options.skip, side);
     if mods.is_empty() {
@@ -1628,7 +1652,8 @@ fn pipeline(
     let resolving = std::time::Instant::now();
     let overrides =
         dependencies::Overrides::read(&instance.join(sunrise_launcher_smod::mod_list::DIR))?;
-    let resolution = resolve_build_dependencies(instance, &mods, &declared, side, &overrides)?;
+    let (dispatch, resolution) =
+        resolve_build_dependencies(instance, &mods, &declared, side, &overrides)?;
     timed("Resolving the dependencies", resolving)?;
     let ordered: Vec<Bundle> = resolution.order.iter().map(|&i| mods[i].clone()).collect();
     let ids: Vec<&str> = mods.iter().map(|b| b.manifest.id.as_str()).collect();
@@ -1676,7 +1701,13 @@ fn pipeline(
         Some(sdk)
     };
     let pinning = std::time::Instant::now();
-    let mixins_pins = mixins::pins(&mods, sdk.as_ref(), &sdk_base, local_sdk.as_deref())?;
+    let (mixins_pins, mut read) =
+        mixins::read_pins(&mods, sdk.as_ref(), local_sdk.as_deref(), |pin| {
+            Ok(sdk_cache::index(&sdk_base, pin, &keys)?)
+        })?;
+    if let Some(sdk) = &sdk {
+        read.sdk.insert(revision.clone(), sdk.signed().to_owned());
+    }
     // Give older SDK tools the exact pin they require, and hash the same inputs we build.
     // Only the incoming copies change; the recorded source digests still name the originals.
     for (bundle, pin) in mods.iter().zip(&mixins_pins) {
@@ -1843,30 +1874,44 @@ fn pipeline(
         target,
         platform_key(developer, platform, origin).as_deref(),
         &requested,
+        &left_out,
     )?;
-    // Kept beside the build once it is installed or used again: the fast path's key for it.
-    let inputs = || {
-        files.as_deref().map(|files| {
-            reuse::Inputs {
-                revision: &revision,
-                base,
-                origin,
-                profile,
-                target,
-                platform,
-                exact: options.exact_home.is_some(),
-                left_out: &left_out,
-                mods: &mods,
-                files,
-            }
-            .key()
-        })
+    // What an installed client build of this plan holds.
+    let contents = reuse::Contents {
+        revision: &revision,
+        origin,
+        mixins: &mixins,
+        profile,
+        kept: &mods,
+        digests: &digests,
+        left_out: &left_out,
+    };
+    // A client build is used again only when the build there holds this plan; else the plan
+    // installs under the next version (`reuse::versions`).
+    let (version, exists) = match target {
+        Target::Client => reuse::installable(&version, &contents)?,
+        Target::Server => {
+            let exists = target.directory(&version).join(".installed").is_file();
+            (version, exists)
+        }
+    };
+    // Kept beside a client build once it is installed or used again: what the fast path proves
+    // it with next time (`reuse`).
+    let record = || {
+        if target != Target::Client {
+            return;
+        }
+        reuse::record(&reuse::Planned {
+            version: &version,
+            image: reuse::Image::new(&mods, &mixins_pins, &ordered, &dispatch, &left_out, &read),
+            admission: reuse::Admission::new(base, origin, options.exact_home.is_some()),
+            contents: &contents,
+        });
     };
     if let Some(stage) = options.staging {
         let _publication = crate::run_leases::installation().map_err(cache_error)?;
         stage.retain_target(&version)?;
     }
-    let exists = target.directory(&version).join(".installed").is_file();
     timed("Planning the build", started)?;
     let fetching = std::time::Instant::now();
     let prebuilt = if exists {
@@ -2153,9 +2198,7 @@ fn pipeline(
             cancellation,
         )?;
         timed("Installing the build", installing)?;
-        if let Some(key) = inputs() {
-            reuse::record(target, &version, &key);
-        }
+        record();
         // Kept only once the build they verified is installed, and only while the attempt
         // hasn't been stopped: a stopped build keeps nothing. A failure here costs only the
         // next build's time.
@@ -2173,9 +2216,7 @@ fn pipeline(
     } else {
         // Used again: it counts as the newest of the builds kept (`prune`).
         let _ = fs::write(target.directory(&version).join(".installed"), "");
-        if let Some(key) = inputs() {
-            reuse::record(target, &version, &key);
-        }
+        record();
     }
     built.secs = started.elapsed().as_secs();
     Ok(built)
@@ -2354,10 +2395,13 @@ fn select_build_profile(
             let routes = plan();
             cancellation.check()?;
             routes.map_err(String::from)?;
-            Ok(Profile::Optimized)
+            Ok(AUTOMATIC)
         }
     }
 }
+
+/// The profile a build with none chosen uses ([`select_build_profile`]).
+const AUTOMATIC: Profile = Profile::Optimized;
 
 /// Builds `folder`'s mods on the Sunrise revision they pin (else `base`'s, the installed version
 /// whose game files the build reuses: a native build's own revision when it is one, [`base_for`])
@@ -2385,6 +2429,26 @@ pub fn build(
     }
     logged(cancellation, &|| progress(Step::Waiting), |cache| {
         let lease = cache.map_err(|error| Failed::Other(error.into()))?;
+        // A set installed from these same inputs is used before the mods are checked to choose
+        // the profile: that check runs the SDK tool on every mod (`reuse`).
+        cancellation.check()?;
+        let early = BuildOptions {
+            cancellation: cancellation.clone(),
+            worlds: Some(&instance.home),
+            leave_out,
+            ..BuildOptions::default()
+        };
+        let chosen = profile.unwrap_or(AUTOMATIC);
+        if let Some(built) = reuse::before_planning(base, folder, chosen, &early, &progress)? {
+            return finish_profile_build(
+                base,
+                instance,
+                cancellation,
+                Ok(built),
+                &progress,
+                catalogue,
+            );
+        }
         let profile = select_build_profile(instance.native_profile, profile, cancellation, || {
             planning::classify(folder, Some(base), lease, cancellation)
         })?;
@@ -2788,7 +2852,7 @@ fn carried_over(name: &std::ffi::OsStr, target: Target) -> bool {
     .collect();
     own.push(backend::CLIENT.to_string());
     own.push(".installed".to_string());
-    own.push(reuse::INPUTS.to_string());
+    own.push(reuse::EVIDENCE.to_string());
     if target == Target::Server {
         own.push("sunrise-engine".to_string());
     }
@@ -3807,7 +3871,7 @@ mod tests {
         for own in [
             backend::CLIENT,
             ".installed",
-            reuse::INPUTS,
+            reuse::EVIDENCE,
             "native-mods.json",
             "native-data",
         ] {
@@ -3922,6 +3986,40 @@ mod tests {
         assert!(bundles(&many.join("notes")).is_err());
     }
 
+    /// A build that leaves a mod out is another version than the whole set's. `pipeline` names
+    /// both from every requested mod (`requested`), so before, they shared one: once the reduced
+    /// build was installed, a plan of the whole set found it under its own version and said it
+    /// was up to date, without the mod.
+    #[test]
+    fn a_build_that_leaves_a_mod_out_never_has_the_whole_sets_version() {
+        let d = dir("reduced-version");
+        write_native(&d.join("alpha"), "alpha", A, B);
+        write_native(&d.join("beta"), "beta", A, B);
+        let requested = bundles(&d).unwrap();
+        let skip = [LeftOut::new(&requested[1], isolate::Why::DidNotBuild)];
+        let version = |skip: &[LeftOut]| {
+            // As `pipeline` names a build: every requested mod, and the mods this attempt leaves out.
+            let (left_out, kept, _) = kept_mods(&requested, skip, side_of(Target::Client));
+            assert_eq!(kept.len(), 2 - skip.len());
+            version_for(
+                A,
+                B,
+                Profile::Optimized,
+                Target::Client,
+                None,
+                &requested,
+                &left_out,
+            )
+            .unwrap()
+        };
+        let whole = version(&[]);
+        let reduced = version(&skip);
+        assert_ne!(reduced, whole, "the reduced build has its own version");
+        assert_eq!(version(&skip), reduced, "the same reduced build again");
+        assert_eq!(version(&[]), whole);
+        let _ = fs::remove_dir_all(d);
+    }
+
     /// Which mods a build keeps turns on each one's uses table: a repack that only adds, drops or
     /// changes the table is another build, so the installed one (and the mods it left out) is
     /// never reused for it; the same table again is the same build.
@@ -3938,6 +4036,7 @@ mod tests {
                 Target::Client,
                 None,
                 &bundles(&d).unwrap(),
+                &[],
             )
             .unwrap()
         };
@@ -3958,6 +4057,7 @@ mod tests {
             Target::Client,
             None,
             &bundles(&d).unwrap(),
+            &[],
         );
         assert!(
             unreadable.is_err(),
@@ -4098,6 +4198,7 @@ mod tests {
             Target::Client,
             None,
             &bundles(&out).unwrap(),
+            &[],
         )
         .unwrap();
         fs::write(path, b"changed").unwrap();
@@ -4109,7 +4210,8 @@ mod tests {
                 Profile::Optimized,
                 Target::Client,
                 None,
-                &bundles(&out).unwrap()
+                &bundles(&out).unwrap(),
+                &[]
             )
             .unwrap()
         );
@@ -4182,6 +4284,7 @@ mod tests {
                 Target::Client,
                 None,
                 &bundles(&d).unwrap(),
+                &[],
             )
             .unwrap()
         };
