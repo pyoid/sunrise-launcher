@@ -152,7 +152,8 @@ pub(super) fn set_up_problem(error: SetUpError) -> Problem {
     }
 }
 
-const NEEDS_VERSION: &str = "Install a Sunrise game build first, then prepare it.";
+const NEEDS_VERSION: &str =
+    crate::i18n::tr_key("Install a Sunrise game build first, then prepare it.");
 
 /// Creates a server: its folder, the world (a copy when asked), `init` and the settings, then adds it to
 /// the list. `tag` is the installed version whose programs and game files it uses when none are set up.

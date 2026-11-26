@@ -72,7 +72,7 @@ pub fn what(file: &Path) -> Result<Dropped, String> {
         // extension, so a file nothing else claims is read before giving up.
         _ if is_build(file) => return Ok(Dropped::Build),
         _ => {
-            let kinds = "a .zip, a .sshader or a Sunrise game build";
+            let kinds = crate::i18n::tr_key("a .zip, a .sshader or a Sunrise game build");
             return Err(trf(
                 "{name} can't be imported: drop {kinds}.",
                 &[("name", &name_of(file)), ("kinds", tr(kinds))],

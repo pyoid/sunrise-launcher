@@ -145,8 +145,9 @@ impl Launcher {
             }
             Fix::Prepare => match self.selected().cloned() {
                 Some(tag) if backend::is_prepared(&tag) => {
-                    self.servers
-                        .start_job("Copying the game files", move |log| {
+                    self.servers.start_job(
+                        crate::i18n::tr_key("Copying the game files"),
+                        move |log| {
                             log(trf(
                                 "Copying the game files prepared for Sunrise {tag}",
                                 &[("tag", &tag)],
@@ -156,7 +157,8 @@ impl Launcher {
                                     tr("The game files are ready. Press Start again.").to_string()
                                 })
                                 .map_err(Problem::plain)
-                        });
+                        },
+                    );
                 }
                 _ => {
                     self.servers.create = None;
