@@ -602,3 +602,52 @@ fn a_download_goes_on_past_an_asset_that_keeps_failing() {
     assert!(last.contains("1 of 2 files failed"), "{last}");
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `count` files whose body is "file {i}" at url "{i}", under `dir`.
+fn numbered(dir: &Path, count: usize) -> Vec<File> {
+    (0..count)
+        .map(|i| File {
+            url: i.to_string(),
+            sha1: sha1_hex(format!("file {i}").as_bytes()),
+            size: None,
+            path: dir.join(i.to_string()),
+        })
+        .collect()
+}
+
+#[test]
+fn scattered_failures_do_not_make_a_download_give_up() {
+    let dir = scratch("scattered");
+    let files = numbered(&dir, 20);
+    let attempts = AtomicUsize::new(0);
+    let fetch = |url: &str| {
+        attempts.fetch_add(1, Relaxed);
+        let i: usize = url.parse().unwrap();
+        if i % 3 == 0 {
+            Err("is gone".to_string())
+        } else {
+            Ok(format!("file {i}").into_bytes())
+        }
+    };
+    let err = fetch_each(&files, 1, &fetch, &GO, &|_| {}, false).unwrap_err();
+    assert!(err.contains("7 of 20 files failed"), "{err}");
+    assert_eq!(attempts.load(Relaxed), 20);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_download_where_every_file_fails_gives_up_early() {
+    let dir = scratch("unreachable");
+    let files = numbered(&dir, 100);
+    let attempts = AtomicUsize::new(0);
+    let fetch = |_: &str| {
+        attempts.fetch_add(1, Relaxed);
+        Err("timed out".to_string())
+    };
+    let jobs = 4;
+    let err = fetch_each(&files, jobs, &fetch, &GO, &|_| {}, false).unwrap_err();
+    assert!(err.contains("Stopped after 16 consecutive"), "{err}");
+    assert!(err.contains("timed out"), "{err}");
+    assert!(attempts.load(Relaxed) <= CONSECUTIVE_FAILURE_LIMIT + jobs);
+    let _ = fs::remove_dir_all(&dir);
+}

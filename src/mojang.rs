@@ -346,6 +346,11 @@ fn objects(index: &Value, dir: &Path) -> Result<Vec<File>, String> {
         .collect()
 }
 
+/// Downloads in a row that fail, with none succeeding between, after which `fetch_each` stops
+/// trying the rest: two full waves of the 8 download workers, so a hiccup or a few missing
+/// objects never reach it, but an unreachable host does not cost thousands of timeouts.
+const CONSECUTIVE_FAILURE_LIMIT: usize = 16;
+
 /// One file from Mojang, refused unless it has the size and sha1 Mojang lists.
 fn fetch_file(fetch: Fetch, file: &File) -> Result<Vec<u8>, String> {
     let body = fetch(&file.url)?;
@@ -387,6 +392,8 @@ fn fetch_each(
     let next = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
     let failed = Mutex::new(None);
+    let consecutive_failures = AtomicUsize::new(0);
+    let gave_up = AtomicBool::new(false);
     DONE.store(0, Relaxed);
     TOTAL.store(files.len(), Relaxed);
     std::thread::scope(|scope| {
@@ -394,7 +401,9 @@ fn fetch_each(
             .map(|_| {
                 scope.spawn(|| {
                     while let Some(file) = files.get(next.fetch_add(1, Relaxed)) {
-                        if stop_on_error && failed.lock().unwrap().is_some() {
+                        if gave_up.load(Relaxed)
+                            || (stop_on_error && failed.lock().unwrap().is_some())
+                        {
                             break;
                         }
                         if cancel.load(Relaxed) {
@@ -405,9 +414,18 @@ fn fetch_each(
                             let got = fetch_file(fetch, file)
                                 .map_err(|e| format!("{} {e}", file.url))
                                 .and_then(|body| write_file(&file.path, &body));
-                            if let Err(e) = got {
-                                errors.fetch_add(1, Relaxed);
-                                failed.lock().unwrap().get_or_insert(e);
+                            match got {
+                                Ok(_) => consecutive_failures.store(0, Relaxed),
+                                Err(e) => {
+                                    errors.fetch_add(1, Relaxed);
+                                    failed.lock().unwrap().get_or_insert(e);
+                                    if consecutive_failures.fetch_add(1, Relaxed) + 1
+                                        >= CONSECUTIVE_FAILURE_LIMIT
+                                    {
+                                        gave_up.store(true, Relaxed);
+                                        break;
+                                    }
+                                }
                             }
                         }
                         DONE.store(done.fetch_add(1, Relaxed) + 1, Relaxed);
@@ -426,6 +444,9 @@ fn fetch_each(
     });
     TOTAL.store(0, Relaxed);
     match failed.into_inner().unwrap() {
+        Some(e) if gave_up.load(Relaxed) => Err(format!(
+            "Stopped after {CONSECUTIVE_FAILURE_LIMIT} consecutive download failures (the first: {e})"
+        )),
         Some(e) if !stop_on_error && e != CANCELLED => Err(format!(
             "{} of {} files failed, the first: {e}",
             errors.load(Relaxed),
