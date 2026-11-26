@@ -649,5 +649,7 @@
   "Installs {count} of its {all} mods: the rest don't fit this build yet.": "Installs {count} of its {all} mods: the rest don't fit this build yet.",
   "Installs {count} of its {all} mods: the rest are optional. Open it to add them.": "Installs {count} of its {all} mods: the rest are optional. Open it to add them.",
   "Installs {count} of its {all} mods: some don't fit this build yet and some are optional. Open it to choose.": "Installs {count} of its {all} mods: some don't fit this build yet and some are optional. Open it to choose.",
-  "Install {count}": "Install {count}"
+  "Install {count}": "Install {count}",
+  "Profile game build: not played yet; it stays on {build}": "Profile game build: not played yet; it stays on {build}",
+  "Profile game build: not played yet; it follows the newest {channel} build": "Profile game build: not played yet; it follows the newest {channel} build"
 }

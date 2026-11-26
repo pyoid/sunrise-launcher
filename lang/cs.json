@@ -2168,7 +2168,6 @@
   "Not checked": "Not checked",
   "Not checked for {build} yet": "Not checked for {build} yet",
   "Not checked yet": "Not checked yet",
-  "Not initialized": "Not initialized",
   "Nothing matches “{query}”.": "Nothing matches “{query}”.",
   "Nothing was changed. Use --confirm-world-loss only if you accept this risk.": "Nothing was changed. Use --confirm-world-loss only if you accept this risk.",
   "Nothing was removed.": "Nothing was removed.",
@@ -2480,5 +2479,7 @@
   "Installs {count} of its {all} mods: the rest don't fit this build yet.": "Installs {count} of its {all} mods: the rest don't fit this build yet.",
   "Installs {count} of its {all} mods: the rest are optional. Open it to add them.": "Installs {count} of its {all} mods: the rest are optional. Open it to add them.",
   "Installs {count} of its {all} mods: some don't fit this build yet and some are optional. Open it to choose.": "Installs {count} of its {all} mods: some don't fit this build yet and some are optional. Open it to choose.",
-  "Install {count}": "Install {count}"
+  "Install {count}": "Install {count}",
+  "Profile game build: not played yet; it stays on {build}": "Profile game build: not played yet; it stays on {build}",
+  "Profile game build: not played yet; it follows the newest {channel} build": "Profile game build: not played yet; it follows the newest {channel} build"
 }
