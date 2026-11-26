@@ -322,6 +322,8 @@ struct Launcher {
     starting_client: Option<String>,
     /// Which step the accepted Play is at, for the label while the game is starting.
     play_step: Option<backend::PlayStep>,
+    /// Live counted detail shown beside/under "Preparing…" while Play is working.
+    play_detail: Option<String>,
     /// The accepted Play the session worker is answering.
     starting_play: Option<launcher_play::PlayIntent>,
     /// Play was pressed on a version not prepared yet: it starts once this preparation ends well.

@@ -76,6 +76,7 @@ impl Resources {
                     &handoff,
                 )?;
                 backend::sounds_staged(base, &minecraft, log, &handoff);
+                launcher_log::play_detail(crate::i18n::tr("Preparing the game"));
                 preparer::run_staged(command, &handoff, log)?;
             }
         }
@@ -122,18 +123,27 @@ impl Resources {
             let Some(binary) = preparer::binary(&root) else {
                 return Ok(None);
             };
+            launcher_log::play_detail(crate::i18n::tr("Preparing the game"));
+            let step = launcher_log::step("Packing game data cache");
             match preparer::data_file(&binary, &root, resources, Some(handoff)) {
                 Ok(Some(true)) => {
                     check()?;
-                    Ok(digest_file(&resources.join(preparer::DATA_FILE))
+                    let digest = digest_file(&resources.join(preparer::DATA_FILE))
                         .ok()
-                        .flatten())
+                        .flatten();
+                    step.done("");
+                    Ok(digest)
                 }
-                Ok(_) => Ok(None),
+                Ok(_) => {
+                    step.done("already present");
+                    Ok(None)
+                }
                 Err(error) if stop.is_some_and(crate::native_mods::Cancellation::is_stopped) => {
+                    step.failed(&error);
                     Err(error)
                 }
                 Err(error) => {
+                    step.failed(&error);
                     crate::elog!("{error}");
                     Ok(None)
                 }
@@ -169,9 +179,23 @@ impl Resources {
         ] {
             require_dir(dir)?;
         }
+        launcher_log::play_detail(crate::i18n::tr("Checking the game files"));
+        let meter = launcher_log::PlayMeter::new(|done, total| {
+            crate::i18n::trf(
+                "Checking the game files: {done} of {total}",
+                &[("done", &done.to_string()), ("total", &total.to_string())],
+            )
+        });
+        let on_done = |done, total| meter.tick(done, total);
         let actual = logged("Verifying game files", || {
             Ok(
-                match artifact::tree_with_workers(&path, true, pool::workers(), None)? {
+                match artifact::tree_with_progress(
+                    &path,
+                    true,
+                    pool::workers(),
+                    None,
+                    Some(&on_done),
+                )? {
                     Some((digest, files)) => (Some(digest), files),
                     None => (None, 0),
                 },
@@ -223,11 +247,20 @@ impl Resources {
             require_dir(ancestor)?;
         }
         require_dir(root)?;
-        let primary = logged("Sealing game files: hashing", || {
+        launcher_log::play_detail(crate::i18n::tr("Sealing the game files"));
+        // One monotonic count across hashing, copying and flushing so the count never restarts.
+        let seal_meter = launcher_log::PlayMeter::new(|done, total| {
+            crate::i18n::trf(
+                "Sealing the game files: {done} of {total}",
+                &[("done", &done.to_string()), ("total", &total.to_string())],
+            )
+        });
+        let on_hash = |done, total: usize| seal_meter.tick(done, total.saturating_mul(3));
+        let (primary, hashed_files) = logged("Sealing game files: hashing", || {
             Ok(
-                match artifact::tree_with_workers(source, true, workers, stop)? {
-                    Some((digest, files)) => (Some(digest), files),
-                    None => (None, 0),
+                match artifact::tree_with_progress(source, true, workers, stop, Some(&on_hash))? {
+                    Some((digest, files)) => ((Some(digest), files), files),
+                    None => ((None, 0), 0),
                 },
             )
         })?;
@@ -253,14 +286,32 @@ impl Resources {
                 .tempdir_in(root.join(".local"))
                 .map_err(|error| at(root, error))?;
             let candidate = stage.path().join("resources");
+            let on_copy = |done, total: usize| {
+                seal_meter.tick(
+                    hashed_files.saturating_add(done),
+                    hashed_files.saturating_add(total.saturating_mul(2)),
+                )
+            };
             let copied = logged("Sealing game files: copying", || {
-                let copied = copy_tree_with(source, &candidate, true, 0, workers, stop)?;
+                let copied =
+                    copy_tree_with(source, &candidate, true, 0, workers, stop, Some(&on_copy))?;
                 let files = copied.files.len();
                 Ok((copied, files))
             })?;
+            let copied_files = copied.files.len();
+            let on_flush = |done, total: usize| {
+                seal_meter.tick(
+                    hashed_files
+                        .saturating_add(copied_files)
+                        .saturating_add(done),
+                    hashed_files
+                        .saturating_add(copied_files)
+                        .saturating_add(total),
+                )
+            };
             logged("Sealing game files: flushing", || {
-                flush_copied(&copied, workers, stop)?;
-                Ok(((), copied.files.len()))
+                flush_copied(&copied, workers, stop, Some(&on_flush))?;
+                Ok(((), copied_files))
             })?;
             let (from, to) = if exists {
                 (candidate.as_path(), &resources)
@@ -340,7 +391,16 @@ pub(super) fn copy_tree(
     skip_accelerator: bool,
     depth: usize,
 ) -> Result<(), String> {
-    copy_tree_with(source, dest, skip_accelerator, depth, pool::workers(), None).map(drop)
+    copy_tree_with(
+        source,
+        dest,
+        skip_accelerator,
+        depth,
+        pool::workers(),
+        None,
+        None,
+    )
+    .map(drop)
 }
 
 /// What a copy made: every directory in creation order, then every file.
@@ -358,16 +418,18 @@ fn copy_tree_with(
     depth: usize,
     workers: usize,
     stop: Option<&Cancellation>,
+    on_done: Option<&(dyn Fn(usize, usize) + Sync)>,
 ) -> Result<Copied, String> {
     let mut copied = Copied {
         dirs: Vec::new(),
         files: Vec::new(),
     };
     lay_out(source, dest, skip_accelerator, depth, stop, &mut copied)?;
-    pool::run(
+    pool::run_with_progress(
         &copied.files,
         workers,
         stop,
+        on_done,
         || (),
         |_, (src, dst)| {
             let meta = fs::symlink_metadata(src).map_err(|e| at(src, e))?;
@@ -426,11 +488,13 @@ fn flush_copied(
     copied: &Copied,
     workers: usize,
     stop: Option<&Cancellation>,
+    on_done: Option<&(dyn Fn(usize, usize) + Sync)>,
 ) -> Result<(), String> {
-    pool::run(
+    pool::run_with_progress(
         &copied.files,
         workers,
         stop,
+        on_done,
         || (),
         |_, (_, dst)| durable::flush_tree(dst).map_err(|e| at(dst, e)),
     )?;
@@ -620,7 +684,7 @@ mod tests {
             assert_eq!(Some(error), stop.check().err());
             assert!(!parent(root).exists());
         }
-        let copying = copy_tree_with(&source, &root.join("copy"), true, 0, 2, Some(&stop));
+        let copying = copy_tree_with(&source, &root.join("copy"), true, 0, 2, Some(&stop), None);
         assert!(copying.is_err());
         let leftovers: Vec<_> = fs::read_dir(root.join(".local"))
             .unwrap()
@@ -638,7 +702,7 @@ mod tests {
         let link = source.join("assets/deep/link");
         std::os::unix::fs::symlink(source.join("assets/empty.txt"), &link).unwrap();
         for workers in [1, 2] {
-            let error = copy_tree_with(&source, &root.join("copy"), true, 0, workers, None)
+            let error = copy_tree_with(&source, &root.join("copy"), true, 0, workers, None, None)
                 .err()
                 .unwrap();
             assert_eq!(error, setup_error(&link));
@@ -663,7 +727,7 @@ mod tests {
         };
         let snapshot = sealed.path_at(root);
         fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
-        copy_tree_with(&source, &snapshot, true, 0, 1, None).unwrap();
+        copy_tree_with(&source, &snapshot, true, 0, 1, None, None).unwrap();
         write_receipt(&parent(root).join(CURRENT), &sealed).unwrap();
         assert_eq!(Resources::current(root).unwrap().as_ref(), Some(&sealed));
         assert_eq!(artifact::tree(&snapshot, true).unwrap(), Some(primary));

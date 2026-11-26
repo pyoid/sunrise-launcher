@@ -228,6 +228,16 @@ pub(super) fn tree_with_workers(
     workers: usize,
     stop: Option<&Cancellation>,
 ) -> Result<Option<([u8; 32], usize)>, String> {
+    tree_with_progress(path, resources, workers, stop, None)
+}
+
+pub(super) fn tree_with_progress(
+    path: &Path,
+    resources: bool,
+    workers: usize,
+    stop: Option<&Cancellation>,
+    on_done: Option<&(dyn Fn(usize, usize) + Sync)>,
+) -> Result<Option<([u8; 32], usize)>, String> {
     let device = match fs::symlink_metadata(path) {
         Ok(meta) if meta.is_dir() && plain_file(&meta) => {
             #[cfg(unix)]
@@ -246,10 +256,11 @@ pub(super) fn tree_with_workers(
     };
     let mut files = Vec::new();
     let root = directory(path, 0, device, resources, stop, &mut files)?;
-    let digests = super::pool::run(
+    let digests = super::pool::run_with_progress(
         &files,
         workers,
         stop,
+        on_done,
         || vec![0u8; 64 * 1024],
         |buffer, file| digest_open(file, buffer),
     )?;

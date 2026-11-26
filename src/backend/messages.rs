@@ -75,6 +75,8 @@ pub enum Msg {
     Session(Result<Option<crate::account::GameSession>, crate::account::NoOwner>),
     /// The step Play is at before the game starts, for the button's label.
     PlayStep(PlayStep),
+    /// Live detail line under "Preparing…" while Play is working (e.g. file counts).
+    PlayDetail(String),
     ManagedBuild {
         instance: String,
         profile: String,

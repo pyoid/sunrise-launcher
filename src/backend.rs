@@ -5186,7 +5186,13 @@ fn monitor(
         readers.push(std::thread::spawn(move || {
             for line in BufReader::new(stream).lines().map_while(Result::ok) {
                 let live = forwarding.lock().unwrap();
-                if !*live || tx.send(Msg::Line(job, line)).is_err() {
+                if !*live {
+                    break;
+                }
+                if job == Job::Prepare {
+                    crate::launcher_log::line(format!("Preparing: {line}"));
+                }
+                if tx.send(Msg::Line(job, line)).is_err() {
                     break;
                 }
             }

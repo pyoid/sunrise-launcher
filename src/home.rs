@@ -328,15 +328,27 @@ impl Launcher {
                             .child(instance.name.clone()),
                     ),
             )
-            .child(
+            .child({
+                let view = self.launch_facts().view();
+                let (line, tabular) = match view.play_detail {
+                    Some(detail) => (detail, true),
+                    None => (played, false),
+                };
                 div()
                     .mt(px(if compact { 5. } else { 10. }))
+                    .h(px(22.))
                     .max_w_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .text_size(px(tokens::BODY))
                     .text_color(text)
+                    .when(tabular, |d| {
+                        d.font_family(theme::MONO).text_size(px(tokens::LABEL))
+                    })
                     .truncate()
-                    .child(played),
-            );
+                    .child(line)
+            });
         let receipt =
             instance.kind != instances::Kind::Pack && self.check_build_changes(&instance.home, cx);
         div()
@@ -422,7 +434,15 @@ impl Launcher {
                 d.tooltip(crate::glass_ui::tip(text))
             })
             .when(idle, |d| d.child(blocks::icon("play", 17., on.into())))
-            .child(view.main.label())
+            .child(
+                if view.play_detail.is_some()
+                    && matches!(view.main, Main::Step(backend::PlayStep::Assets))
+                {
+                    tr("Preparing…").into()
+                } else {
+                    view.main.label()
+                },
+            )
             .when(view.enabled, |d| {
                 d.cursor_pointer()
                     .hover(move |s| {

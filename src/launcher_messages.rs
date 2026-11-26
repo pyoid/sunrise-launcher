@@ -145,6 +145,9 @@ impl Launcher {
                 Msg::Playing(playing) => self.playing = playing,
                 Msg::PlayStep(step) => {
                     if self.starting_client.is_some() {
+                        if self.play_step != Some(step) {
+                            self.play_detail = None;
+                        }
                         self.play_step = Some(step);
                     }
                     if step == backend::PlayStep::SignIn && self.native_step.take().is_some() {
@@ -156,6 +159,11 @@ impl Launcher {
                             self.close_sheet();
                         }
                         self.refresh_installed();
+                    }
+                }
+                Msg::PlayDetail(detail) => {
+                    if self.starting_client.is_some() || self.preparing {
+                        self.play_detail = Some(detail);
                     }
                 }
                 Msg::ManagedBuild {
@@ -232,6 +240,7 @@ impl Launcher {
                     }
                     self.starting_client = None;
                     self.play_step = None;
+                    self.play_detail = None;
                     self.accounts = Accounts::load();
                     self.load_auth_statuses(false);
                     match *result {
@@ -335,6 +344,8 @@ impl Launcher {
                         account::discard_launch_session(session_file);
                         continue;
                     }
+                    self.play_step = None;
+                    self.play_detail = None;
                     for notice in &registry_notices {
                         console_page::keep_line(
                             &mut self.prepare_log,
@@ -563,10 +574,6 @@ impl Launcher {
                         }
                     }
                     if job == Job::Prepare {
-                        // The one place every window preparation's lines pass (the Play path,
-                        // the preparer's own output and a build switch), so launcher.log shows
-                        // where a long preparation is when the window says only "Preparing…".
-                        sunrise_launcher::launcher_log::line(format!("Preparing: {line}"));
                         self.follow_switch_preparation();
                     }
                     // The MCP server keeps its own server's log; the launcher's are the preparer's
@@ -594,6 +601,7 @@ impl Launcher {
                     match job {
                         Job::Prepare => {
                             self.preparing = false;
+                            self.play_detail = None;
                             self.refresh_open_storage_builds();
                             // Play pressed before the version was prepared plays now.
                             if let Some((tag, intent)) = self.play_when_prepared.take() {

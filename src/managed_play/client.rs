@@ -324,7 +324,7 @@ impl Client<'_> {
                     Some(super::Resources::for_play(
                         old.base(),
                         profile.handoff(),
-                        &|line| progress(Progress::Line(line)),
+                        &|line| emit_prepare_line(&progress, line),
                     )?)
                 }
                 Err(issue) => return Err(issue.message(|| unsettled!()).into()),
@@ -355,7 +355,7 @@ impl Client<'_> {
             })?;
             check_build(first.base(), first.variant().as_ref())?;
             progress(Progress::Prepare);
-            first.prepare(&|line| progress(Progress::Line(line)))?;
+            first.prepare(&|line| emit_prepare_line(&progress, line))?;
             let (image, notices) = {
                 let _manifest = game_lock(&home)?;
                 crate::browser::installed::recover_game_install(&home)
@@ -536,4 +536,52 @@ pub fn headless_first(instance: &instances::Instance) -> Result<FirstBuild, Stri
             .next()
     };
     FirstBuild::download(release.ok_or(installed)?)
+}
+
+/// Logs a preparation line to `launcher.log` before forwarding it to the caller (both the
+/// window and the CLI `play` path pass through here, so neither logs twice and both record
+/// preparation progress in `launcher.log`).
+fn emit_prepare_line(progress: &impl Fn(Progress), line: String) {
+    crate::launcher_log::line(format!("Preparing: {line}"));
+    progress(Progress::Line(line));
+}
+
+#[cfg(test)]
+mod cli_log_tests {
+    use super::*;
+
+    #[test]
+    fn cli_play_prepare_and_meter_lines_land_in_launcher_log_without_ui_sink() {
+        crate::launcher_log::hide("Alex_CliPlay");
+        let before = crate::launcher_log::since(0).0;
+        let seen = std::cell::RefCell::new(Vec::new());
+        emit_prepare_line(
+            &|p| {
+                if let Progress::Line(line) = p {
+                    seen.borrow_mut().push(line);
+                }
+            },
+            "Downloading Minecraft's files: 5 of 40 for Alex_CliPlay".into(),
+        );
+        let meter =
+            crate::launcher_log::PlayMeter::new(|d, t| format!("Checking cli files: {d} of {t}"));
+        meter.tick(1, 50);
+        assert_eq!(
+            seen.into_inner(),
+            vec!["Downloading Minecraft's files: 5 of 40 for Alex_CliPlay".to_string()]
+        );
+        let (_, lines) = crate::launcher_log::since(before);
+        let prep: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("Preparing: Downloading Minecraft's files: 5 of 40"))
+            .collect();
+        assert_eq!(prep.len(), 1, "{lines:?}");
+        assert!(!prep[0].contains("Alex_CliPlay"), "{prep:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Checking cli files: 1 of 50")),
+            "{lines:?}"
+        );
+    }
 }
