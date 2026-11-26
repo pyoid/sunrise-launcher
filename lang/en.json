@@ -641,5 +641,7 @@
   "{hours} hr": "{hours} hr",
   "{hours} hr {minutes} min": "{hours} hr {minutes} min",
   "Dev · finding builds…": "Dev · finding builds…",
-  "Dev · builds didn't load": "Dev · builds didn't load"
+  "Dev · builds didn't load": "Dev · builds didn't load",
+  "Profile game build: not played yet; it stays on {build}": "Profile game build: not played yet; it stays on {build}",
+  "Profile game build: not played yet; it follows the newest {channel} build": "Profile game build: not played yet; it follows the newest {channel} build"
 }
