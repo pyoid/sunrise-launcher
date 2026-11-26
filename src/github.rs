@@ -14,6 +14,7 @@
 //! Release files are not read here: their `browser_download_url` (github.com, then
 //! release-assets.githubusercontent.com) is not part of the API and has no such limit.
 use crate::backend;
+use crate::i18n::tr;
 use sha2::Digest;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -166,6 +167,7 @@ fn page_with(
         .as_ref()
         .map(|k| k.etag.as_str())
         .filter(|e| !e.is_empty());
+    let mut limited = false;
     let why = match github(url, etag) {
         Answer::Fresh(page, etag) => {
             write_kept(&file, url, etag.as_deref().unwrap_or(""), &page, now);
@@ -181,7 +183,10 @@ fn page_with(
             None => "GitHub answered 304 without a saved copy".to_owned(),
         },
         Answer::NotFound => return Ok(None),
-        Answer::RateLimited => RATE_LIMITED.to_owned(),
+        Answer::RateLimited => {
+            limited = true;
+            "GitHub rate-limited this network".to_owned()
+        }
         Answer::Failed(e) => e,
     };
     let from_mirror = match mirror_url_with(url, mirror_base) {
@@ -214,6 +219,14 @@ fn page_with(
             return Ok(Some(k.page));
         }
     }
+    if limited {
+        if let Some(m) = &from_mirror {
+            crate::launcher_log::line(format!(
+                "{url}: GitHub rate-limited; the mirror failed: {m}"
+            ));
+        }
+        return Err(tr("GitHub is limiting requests from your network for now. Try again in a few minutes, or on another network.").to_owned());
+    }
     Err(match from_mirror {
         Some(m) => format!(
             "{why}, and Sunrise's mirror of GitHub couldn't help either ({m}). Try again in a few minutes."
@@ -221,8 +234,6 @@ fn page_with(
         None => why,
     })
 }
-
-const RATE_LIMITED: &str = "GitHub's rate limit was reached for your network";
 
 /// Whether `url` is an API address of the launcher's own repository.
 fn launcher_url(url: &str) -> bool {
