@@ -754,3 +754,140 @@ esac"#,
         panic!("preparer child {child_pid} survived process-group cancellation");
     }
 }
+
+/// Scratch Windows CI proof of the preparer::run grandchild handle-inheritance hang. Not for merging.
+#[cfg(test)]
+mod preparer_hang_proof {
+    use super::*;
+
+    const FAKE_SRC: &str = r#"
+use std::io::{self, Write};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+#[cfg(windows)]
+extern "system" {
+    fn GetStdHandle(nStdHandle: u32) -> isize;
+    fn SetHandleInformation(hObject: isize, dwMask: u32, dwFlags: u32) -> i32;
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let mode = args.get(1).map(String::as_str).unwrap_or("");
+    if mode == "grandchild" {
+        std::thread::sleep(Duration::from_secs(60));
+        return;
+    }
+    let exe = std::env::current_exe().unwrap();
+    // Write ~2 MiB to stdout and ~256 KiB to stderr (mirrors real preparer volume).
+    let chunk = "x".repeat(1000) + "\n";
+    {
+        let mut out = io::BufWriter::new(io::stdout().lock());
+        for _ in 0..2048 {
+            out.write_all(chunk.as_bytes()).unwrap();
+        }
+        out.flush().unwrap();
+    }
+    {
+        let mut err = io::BufWriter::new(io::stderr().lock());
+        for _ in 0..256 {
+            err.write_all(chunk.as_bytes()).unwrap();
+        }
+        err.flush().unwrap();
+    }
+    if mode == "child-no-inherit" {
+        #[cfg(windows)]
+        unsafe {
+            // Clear HANDLE_FLAG_INHERIT (1) on stdout (-11) and stderr (-12) before spawning.
+            const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
+            const STD_ERROR_HANDLE: u32 = (-12i32) as u32;
+            SetHandleInformation(GetStdHandle(STD_OUTPUT_HANDLE), 1, 0);
+            SetHandleInformation(GetStdHandle(STD_ERROR_HANDLE), 1, 0);
+        }
+    }
+    let child = Command::new(&exe)
+        .arg("grandchild")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    println!("FAKE_CHILD_EXITING grandchild_pid={}", child.id());
+    io::stdout().flush().unwrap();
+}
+"#;
+
+    fn dump_fake_processes(label: &str) {
+        #[cfg(windows)]
+        {
+            let out = std::process::Command::new("pwsh")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'fake_preparer*' } | Select-Object ProcessId, ParentProcessId, Name, CommandLine | Format-Table -AutoSize | Out-String",
+                ])
+                .output();
+            if let Ok(o) = out {
+                eprintln!("=== process list ({label}) ===\n{}", String::from_utf8_lossy(&o.stdout));
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = label;
+        }
+    }
+
+    #[test]
+    #[ignore = "Windows CI proof of preparer::run grandchild pipe-inheritance hang"]
+    fn prove_preparer_grandchild_hang() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("fake_preparer.rs");
+        let bin = dir.path().join(if cfg!(windows) {
+            "fake_preparer.exe"
+        } else {
+            "fake_preparer"
+        });
+        fs::write(&src, FAKE_SRC).unwrap();
+        let status = std::process::Command::new("rustc")
+            .args(["-O", "-o"])
+            .arg(&bin)
+            .arg(&src)
+            .status()
+            .unwrap();
+        assert!(status.success(), "rustc failed");
+
+        for mode in ["child-no-inherit", "child-inherit"] {
+            let lock_path = dir.path().join(format!("{mode}.lock"));
+            let lock_file = fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .unwrap();
+            let prep = Preparation::new(lock_file);
+            let handoff = prep.handoff(None);
+            let mut cmd = crate::process::command(&bin);
+            cmd.arg(mode);
+            let started = std::time::Instant::now();
+            eprintln!("\n=== CASE: {mode} ===");
+            let exit_seen = std::sync::Mutex::new(None::<f64>);
+            let res = run_staged(cmd, &handoff, &|line| {
+                if line.starts_with("FAKE_CHILD_EXITING") {
+                    let t = started.elapsed().as_secs_f64();
+                    *exit_seen.lock().unwrap() = Some(t);
+                    eprintln!("[{t:>6.2}s] stdout: {line}");
+                    dump_fake_processes(mode);
+                }
+            });
+            let returned = started.elapsed().as_secs_f64();
+            let exited_at = exit_seen.lock().unwrap().unwrap_or(-1.0);
+            eprintln!(
+                "[{returned:>6.2}s] run_staged returned ok={} (gap after FAKE_CHILD_EXITING: {:.2}s)",
+                res.is_ok(),
+                returned - exited_at
+            );
+            res.unwrap();
+        }
+    }
+}

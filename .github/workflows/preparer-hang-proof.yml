@@ -1,0 +1,21 @@
+name: Preparer grandchild hang proof (Windows, fake preparer)
+on:
+  push:
+    branches: [sunrise-launcher-preparer-hang-proof]
+
+permissions:
+  contents: read
+
+jobs:
+  prove:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run fake-preparer hang proof
+        shell: bash
+        env:
+          SUNRISE_TELEMETRY_URL: "off"
+        run: |
+          rustup toolchain install "$(cat rust-version)" --profile minimal
+          cargo test --locked --lib preparer_hang_proof::prove_preparer_grandchild_hang -- --ignored --nocapture
