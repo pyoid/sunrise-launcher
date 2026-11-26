@@ -202,7 +202,30 @@ impl Handoff<'_> {
     }
 }
 
-/// Runs `command` to its end, each stdout line to `out`; stderr is read beside it (so no pipe fills) and its lines returned.
+/// How long `run` keeps reading after the preparer exits: whatever it wrote is already in the pipes,
+/// so this only outwaits a leftover process outside its job that still holds them open.
+const DRAIN: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// What a receiver has queued, until it is empty (or `open` turns false: its sender is gone).
+fn drain<T>(rx: &std::sync::mpsc::Receiver<T>, open: &mut bool, mut take: impl FnMut(T)) {
+    use std::sync::mpsc::TryRecvError;
+    loop {
+        match rx.try_recv() {
+            Ok(value) => take(value),
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                *open = false;
+                return;
+            }
+        }
+    }
+}
+
+/// Runs `command` until it exits, each stdout line to `out`; stderr is read beside it (so no pipe fills) and its lines returned.
+///
+/// The end is the preparer's exit, not the pipes' EOF: a process it started (the game's Java) can outlive
+/// it holding the pipes. A Windows preparer's job is terminated at its exit, and whatever still holds a
+/// pipe after [`DRAIN`] is left behind.
 fn run(
     mut command: Command,
     out: &mut dyn FnMut(String),
@@ -234,23 +257,68 @@ fn run(
         None => None,
     };
     drop(child.child().stdin.take());
+    let stdout = child.child().stdout.take().expect("piped");
     let stderr = child.child().stderr.take().expect("piped");
-    let errors = std::thread::spawn(move || tail(stderr));
-    let mut read = 0;
-    for text in lines(child.child().stdout.take().expect("piped")) {
-        let text = text.map_err(unrun)?;
-        read += text.len();
-        // Past the cap the rest is drained unread, so the preparer never blocks on a full pipe.
-        if read <= MAX_OUTPUT {
-            out(text);
+    let (stdout_tx, stdout_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in lines(stdout) {
+            if stdout_tx.send(line.map_err(unrun)).is_err() {
+                return;
+            }
         }
-    }
-    let status = child.wait().map_err(unrun)?;
-    let errors = errors.join().unwrap_or_default();
+    });
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in lines(stderr).map_while(Result::ok) {
+            if stderr_tx.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    let (mut stdout_open, mut stderr_open) = (true, true);
+    let mut errors = Tail::default();
+    let mut read = 0;
+    let mut exited = None;
+    let status = loop {
+        let mut batch = Vec::new();
+        if stdout_open {
+            match stdout_rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                Ok(text) => batch.push(text),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => stdout_open = false,
+            }
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        drain(&stdout_rx, &mut stdout_open, |text| batch.push(text));
+        for text in batch {
+            let text = text?;
+            read += text.len();
+            // Past the cap the rest is drained unread, so the preparer never blocks on a full pipe.
+            if read <= MAX_OUTPUT {
+                out(text);
+            }
+        }
+        drain(&stderr_rx, &mut stderr_open, |line| errors.push(line));
+        match exited {
+            None => {
+                if let Some(status) = child.try_wait().map_err(unrun)? {
+                    // Anything it left running would keep the pipes (and this loop) open.
+                    let _ = child.terminate_job();
+                    exited = Some((status, std::time::Instant::now() + DRAIN));
+                }
+            }
+            Some((status, until)) => {
+                if (!stdout_open && !stderr_open) || std::time::Instant::now() >= until {
+                    break status;
+                }
+            }
+        }
+    };
     if let Some(stop) = stop {
         stop.check()?;
     }
-    Ok((status, errors))
+    Ok((status, errors.kept.into()))
 }
 
 pub(crate) fn run_staged(
@@ -288,18 +356,21 @@ fn lines(stream: impl std::io::Read) -> impl Iterator<Item = std::io::Result<Str
     })
 }
 
-/// The last lines of `stream`, at most [`MAX_ERRORS`] bytes of them.
-fn tail(stream: impl std::io::Read) -> Vec<String> {
-    let mut kept = std::collections::VecDeque::new();
-    let mut size = 0;
-    for line in lines(stream).map_while(Result::ok) {
-        size += line.len();
-        kept.push_back(line);
-        while size > MAX_ERRORS {
-            size -= kept.pop_front().map_or(0, |line| line.len());
+/// The last lines pushed, at most [`MAX_ERRORS`] bytes of them.
+#[derive(Default)]
+struct Tail {
+    kept: std::collections::VecDeque<String>,
+    size: usize,
+}
+
+impl Tail {
+    fn push(&mut self, line: String) {
+        self.size += line.len();
+        self.kept.push_back(line);
+        while self.size > MAX_ERRORS {
+            self.size -= self.kept.pop_front().map_or(0, |line| line.len());
         }
     }
-    kept.into()
 }
 
 /// The JSON reply on the last stdout line of `command`, when the preparer has the subcommand (exit 2 means it doesn't); its log lines go to `line`.
@@ -677,12 +748,37 @@ esac"#,
         let many: String = (0..2000)
             .map(|n| format!("line {n:04} {}\n", "y".repeat(40)))
             .collect();
-        let kept = tail(many.as_bytes());
+        let mut tail = Tail::default();
+        for line in lines(many.as_bytes()).map(Result::unwrap) {
+            tail.push(line);
+        }
+        let kept = tail.kept;
         assert_eq!(
-            kept.last().map(String::as_str),
+            kept.back().map(String::as_str),
             Some(&*format!("line 1999 {}", "y".repeat(40)))
         );
         assert!(kept.iter().map(String::len).sum::<usize>() <= MAX_ERRORS);
+    }
+
+    #[test]
+    fn a_preparer_ends_at_its_exit_though_a_child_still_holds_its_pipes() {
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        // The background sleep inherits both pipes and outlives the script.
+        let binary = fake(
+            dir.path(),
+            "sleep 8 &\nprintf 'hello\\n'\necho oops >&2\nexit 0",
+        );
+        let started = Instant::now();
+        let mut got = Vec::new();
+        let (status, errors) = run(Command::new(binary), &mut |text| got.push(text), None).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "run waited for the pipes' EOF"
+        );
+        assert!(status.success());
+        assert_eq!(got, ["hello"]);
+        assert_eq!(errors, ["oops"]);
     }
 
     #[test]

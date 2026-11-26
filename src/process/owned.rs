@@ -106,6 +106,11 @@ impl Owned {
         &mut self.child
     }
 
+    /// Kills what the child left running in its Windows job, so nothing keeps its pipes open.
+    pub fn terminate_job(&self) -> io::Result<()> {
+        self.child.terminate_job()
+    }
+
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         let status = self.child.try_wait()?;
         if status.is_some() {

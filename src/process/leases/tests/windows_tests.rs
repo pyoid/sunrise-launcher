@@ -263,6 +263,59 @@ fn compiler_actor() {
 }
 
 #[test]
+fn a_preparer_job_ends_at_its_leaders_exit_and_kills_what_it_left_holding_the_pipes() {
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+    let dir = tempfile::tempdir().unwrap();
+    let lock = File::create(dir.path().join(".preparing.lock")).unwrap();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "process::leases::tests::windows_tests::preparer_actor",
+            "--nocapture",
+        ])
+        .env("SUNRISE_PREPARER_TEST", "1");
+    let started = Instant::now();
+    let mut child = spawn_preparer(command, &lock, None, true).unwrap();
+    // The leader exits at once while its `ping` child holds the pipes for 20 seconds.
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(started.elapsed() < Duration::from_secs(5), "leader hung");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success(), "{status}");
+    child.terminate_job().unwrap();
+    // EOF comes only once nothing holds the write end: the job's termination killed `ping`.
+    let mut out = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
+    assert!(out.contains("PREPARER-LINE"), "{out}");
+    assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+#[test]
+#[allow(clippy::zombie_processes)] // The preparer's Job must reap the ping, not this actor.
+fn preparer_actor() {
+    if std::env::var_os("SUNRISE_PREPARER_TEST").is_none() {
+        return;
+    }
+    Command::new("ping")
+        .args(["-n", "20", "127.0.0.1"])
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    println!("PREPARER-LINE");
+    std::io::stdout().flush().unwrap();
+}
+
+#[test]
 fn actor() {
     if std::env::var_os("SUNRISE_WINDOWS_LEASE_ACTOR").is_none() {
         return;
