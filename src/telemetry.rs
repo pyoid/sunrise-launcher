@@ -145,10 +145,15 @@ pub fn preview() -> (String, String) {
     let home = home();
     let waiting = outbox::retain_allowed(&home).len();
     if waiting > 0 {
-        let what = format!(
-            "{waiting} item{} waiting to be sent, exactly as they will leave (compressed):",
-            if waiting == 1 { "" } else { "s" }
-        );
+        let what = if waiting == 1 {
+            crate::i18n::tr("1 item waiting to be sent, exactly as they will leave (compressed):")
+                .to_string()
+        } else {
+            crate::i18n::trf(
+                "{count} items waiting to be sent, exactly as they will leave (compressed):",
+                &[("count", &waiting.to_string())],
+            )
+        };
         return (what, upload::preview(&home));
     }
     let system = with_example_gpu(System::detect_in(Some(&home)));
@@ -192,7 +197,7 @@ pub fn preview() -> (String, String) {
     }))
     .unwrap_or_default();
     (
-        "Nothing is waiting. One example of each kind, from this machine; the game fills in the GPU and screen it uses where these say example (a benchmark upload is the report itself, see docs/benchmark-report.md):".into(),
+        crate::i18n::tr("Nothing is waiting. One example of each kind, from this machine; the game fills in the GPU and screen it uses where these say example (a benchmark upload is the report itself, see docs/benchmark-report.md):").into(),
         json,
     )
 }
@@ -224,20 +229,25 @@ pub fn delete_my_data() -> Result<String, String> {
     outbox::clear(&home).map_err(|e| e.to_string())?;
     gather::clear_profiles(&home).map_err(|e| e.to_string())?;
     let remote = match sunrise_launcher_telemetry::endpoint() {
-        _ if consent.install_id.is_empty() => "Nothing was ever sent from here.",
-        None => {
-            "Sending is turned off here (SUNRISE_TELEMETRY_URL=off), so the server was not asked."
-        }
+        _ if consent.install_id.is_empty() => crate::i18n::tr("Nothing was ever sent from here."),
+        None => crate::i18n::tr(
+            "Sending is turned off here (SUNRISE_TELEMETRY_URL=off), so the server was not asked.",
+        ),
         Some(url) => {
-            upload::delete_remote(&url, &consent.install_id)
-                .map_err(|e| format!("The server could not be reached ({e}). Try again later."))?;
-            "The server deleted everything sent from here."
+            upload::delete_remote(&url, &consent.install_id).map_err(|e| {
+                crate::i18n::trf(
+                    "The server could not be reached ({error}). Try again later.",
+                    &[("error", &e.to_string())],
+                )
+            })?;
+            crate::i18n::tr("The server deleted everything sent from here.")
         }
     };
     consent.reset_install_id();
     consent.save(&home).map_err(|e| e.to_string())?;
-    Ok(format!(
-        "{remote} Nothing is waiting, and this install has a new ID."
+    Ok(crate::i18n::trf(
+        "{remote} Nothing is waiting, and this install has a new ID.",
+        &[("remote", remote)],
     ))
 }
 
@@ -291,9 +301,9 @@ pub fn ensure_allowed(kind: Kind) -> Result<(), String> {
     if consent().allows(kind) {
         return Ok(());
     }
-    Err(format!(
-        "{} are off: turn them on in Settings → Data collection first.",
-        label(kind)
+    Err(crate::i18n::trf(
+        "{name} are off: turn them on in Settings → Data collection first.",
+        &[("name", crate::i18n::tr(label(kind)))],
     ))
 }
 
@@ -301,22 +311,32 @@ pub fn ensure_allowed(kind: Kind) -> Result<(), String> {
 pub fn submit(item: &Item) -> Result<String, String> {
     ensure_allowed(item.kind())?;
     if !outbox::push(&home(), item).map_err(|e| e.to_string())? {
-        return Err("Today's limit for these is reached; try again tomorrow.".into());
+        return Err(
+            crate::i18n::tr("Today's limit for these is reached; try again tomorrow.").into(),
+        );
     }
     Ok(match send() {
-        Flush::Sent { .. } => "Sent. Thank you.".into(),
+        Flush::Sent { .. } => crate::i18n::tr("Sent. Thank you.").into(),
         Flush::Nothing if sunrise_launcher_telemetry::endpoint().is_none() => {
-            "Kept; sending is turned off here (SUNRISE_TELEMETRY_URL=off).".into()
+            crate::i18n::tr("Kept; sending is turned off here (SUNRISE_TELEMETRY_URL=off).").into()
         }
-        _ => "Kept; it will be sent the next time the launcher starts.".into(),
+        _ => crate::i18n::tr("Kept; it will be sent the next time the launcher starts.").into(),
     })
 }
 
 /// A benchmark report file (`docs/benchmark-report.md`), scrubbed, as an upload.
 pub fn benchmark_report(path: &Path) -> Result<Item, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let report: serde_json::Value = serde_json::from_str(&scrubber().scrub(&text))
-        .map_err(|e| format!("{}: not a JSON report ({e})", path.display()))?;
+    let report: serde_json::Value =
+        serde_json::from_str(&scrubber().scrub(&text)).map_err(|e| {
+            crate::i18n::trf(
+                "{path}: not a JSON report ({error})",
+                &[
+                    ("path", &path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            )
+        })?;
     let item = Item::new(
         Source::Launcher,
         backend::VERSION,
@@ -382,7 +402,10 @@ pub fn parse_kinds(names: &[String]) -> Result<Vec<Kind>, String> {
             "bugs" => kinds.push(Kind::Bug),
             "benchmarks" => kinds.push(Kind::Benchmark),
             other => kinds.push(Kind::from_name(other).ok_or_else(|| {
-                format!("{other}: one of performance, crashes, bugs, benchmarks, all")
+                crate::i18n::trf(
+                    "{name}: one of performance, crashes, bugs, benchmarks, all",
+                    &[("name", other)],
+                )
             })?),
         }
     }
