@@ -60,6 +60,18 @@ class Catalogs(unittest.TestCase):
         self.assertEqual(self.run_tool("--rename", "Close", "Done", "--rename", "Cancel", "Done"), 1)
         self.assertIn("Close", self.read("en"))
 
+    def test_a_rename_onto_a_key_only_a_translation_has_is_refused(self):
+        self.write("fr", {"Settings": "Paramètres", "Preferences": "Préférences"})
+        before = {code: self.read(code) for code in ("en", "de", "fr")}
+        self.assertEqual(self.run_tool("--rename", "Settings", "Preferences"), 1)
+        self.assertEqual({code: self.read(code) for code in ("en", "de", "fr")}, before)
+
+    def test_removing_and_renaming_the_same_key_is_refused(self):
+        before = {code: self.read(code) for code in ("en", "de")}
+        self.assertEqual(self.run_tool("--remove", "Settings", "--rename", "Settings", "Preferences"), 1)
+        self.assertEqual(self.run_tool("--remove", "Close", "--rename", "Settings", "Close"), 1)
+        self.assertEqual({code: self.read(code) for code in ("en", "de")}, before)
+
     def test_a_rename_of_a_missing_key_is_refused(self):
         self.assertEqual(self.run_tool("--rename", "Nope", "Still nope"), 1)
 

@@ -7,9 +7,9 @@ only real translations; a key a language lacks shows in English. New keys theref
 translations along; removing one removes it everywhere.
 
 Every rename is checked before any file is written: the old key must exist, the new one must not
-(that would silently drop one of the two sets of translations), and both must have the same
-`{holes}` (a carried translation would still say the old ones). Renaming a key to itself does
-nothing.
+exist in any catalog (that would silently drop one of the two sets of translations), both must have
+the same `{holes}` (a carried translation would still say the old ones), and neither may also be
+given to `--remove`. Renaming a key to itself does nothing.
 """
 
 import argparse
@@ -30,18 +30,31 @@ def holes(text: str) -> set[str]:
     return set(re.findall(r"\{([^{}]*)\}", text))
 
 
-def check_renames(source: dict[str, str], renames: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """The renames that change something, or `RefusedRename` naming the first that can't be done."""
+def check_renames(
+    tables: dict[str, dict[str, str]], remove: list[str], renames: list[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """The renames that change something, or `RefusedRename` naming the first that can't be done.
+
+    `tables` maps each catalog's file name to its entries; `en.json` is the source."""
+    source = tables[SOURCE]
+    removed = set(remove)
     wanted = []
     targets = set()
     for old, new in renames:
         if old == new:
             continue
+        if old in removed or new in removed:
+            raise RefusedRename(f"{old!r} -> {new!r} is also given to --remove: do one or the other")
         if old not in source:
             raise RefusedRename(f"{old!r} is not a key in {SOURCE}")
-        if new in source or new in targets:
+        holder = next((name for name, table in tables.items() if new in table), None)
+        if holder == SOURCE or new in targets:
             raise RefusedRename(
                 f"{new!r} is already a key: renaming {old!r} onto it would drop one key's translations"
+            )
+        if holder:
+            raise RefusedRename(
+                f"{holder} already has {new!r}: renaming {old!r} onto it would drop one of its translations"
             )
         if holes(old) != holes(new):
             raise RefusedRename(
@@ -64,7 +77,7 @@ def apply(lang: Path, keys: list[str], remove: list[str], renames: list[tuple[st
     paths = sorted(lang.glob("*.json"))
     texts = {path: path.read_text(encoding="utf-8") for path in paths}
     tables = {path: json.loads(text) for path, text in texts.items()}
-    renames = check_renames(tables[lang / SOURCE], renames)
+    renames = check_renames({path.name: table for path, table in tables.items()}, remove, renames)
     for path, table in tables.items():
         source = path.name == SOURCE
         for key in remove:
