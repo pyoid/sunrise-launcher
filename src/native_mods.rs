@@ -117,7 +117,13 @@ fn platform_for_game(base: &str) -> Result<BuildPlatform, String> {
         )
     })?;
     let selected_target = rust_toolchain::windows_target_for_machine(machine).ok_or_else(|| {
-        architecture_mismatch(&format!("PE machine 0x{machine:04x}"), "x64 or ARM64")
+        architecture_mismatch(
+            &trf(
+                "PE machine 0x{machine}",
+                &[("machine", &format!("{machine:04x}"))],
+            ),
+            "x64 or ARM64",
+        )
     })?;
     let Some(host) = rust_toolchain::host() else {
         return Err(architecture_mismatch(
@@ -147,7 +153,13 @@ pub(crate) fn known_host_block(base: Option<&str>) -> Option<String> {
 
 fn windows_build_platform(machine: u16, host_target: &str) -> Result<BuildPlatform, String> {
     let target = rust_toolchain::windows_target_for_machine(machine).ok_or_else(|| {
-        architecture_mismatch(&format!("PE machine 0x{machine:04x}"), "x64 or ARM64")
+        architecture_mismatch(
+            &trf(
+                "PE machine 0x{machine}",
+                &[("machine", &format!("{machine:04x}"))],
+            ),
+            "x64 or ARM64",
+        )
     })?;
     if rust_toolchain::windows_target_for_host(host_target, machine).is_none() {
         return Err(architecture_mismatch(
@@ -274,10 +286,13 @@ fn logged_then<T, E: std::fmt::Display + From<String>>(
     // not look stuck meanwhile.
     match &result {
         Ok(_) => {
-            let _ = append_log("Build completed.");
+            let _ = append_log(tr("Build completed."));
         }
         Err(error) => {
-            let _ = append_log(&format!("The build failed: {error}"));
+            let _ = append_log(&trf(
+                "The build failed: {error}",
+                &[("error", &error.to_string())],
+            ));
         }
     }
     // Keep this build lease through installation/export and the cleanup, including failed
@@ -544,7 +559,12 @@ fn ask_github(repo: &str, revision: &str) -> Result<String, String> {
     commit["commit"]["committer"]["date"]
         .as_str()
         .map(str::to_owned)
-        .ok_or_else(|| format!("GitHub doesn't know {repo} commit {revision}."))
+        .ok_or_else(|| {
+            trf(
+                "GitHub doesn't know {repo} commit {revision}.",
+                &[("repo", repo), ("revision", revision)],
+            )
+        })
 }
 
 /// How [`build`] starts its error when mods pin another Sunrise revision.
@@ -1597,7 +1617,11 @@ fn pipeline(
     let mut ids = std::collections::HashSet::new();
     for b in &found {
         if !ids.insert(&b.manifest.id) {
-            return Err(format!("Duplicate native mod id {:?}.", b.manifest.id).into());
+            return Err(trf(
+                "Duplicate native mod id {id}.",
+                &[("id", &format!("{:?}", b.manifest.id))],
+            )
+            .into());
         }
         copy_bundle(b, &incoming.join(&b.manifest.id))?;
     }
@@ -1867,7 +1891,7 @@ fn pipeline(
         stage.retain_target(&version)?;
     }
     let exists = target.directory(&version).join(".installed").is_file();
-    timed("Planning the build", started)?;
+    timed(tr("Planning the build"), started)?;
     let fetching = std::time::Instant::now();
     let prebuilt = if exists {
         None
@@ -1962,7 +1986,7 @@ fn pipeline(
         Some(package)
     };
     if prebuilt.is_some() {
-        timed("Checking the prebuilt game", fetching)?;
+        timed(tr("Checking the prebuilt game"), fetching)?;
     }
     cancellation.check()?;
     let plan = if exists {
@@ -2032,7 +2056,7 @@ fn pipeline(
                 Failed::Tools(error)
             }
         })?;
-        timed("Checking the Rust toolchain", checking)?;
+        timed(tr("Checking the Rust toolchain"), checking)?;
         progress(Step::PrebuiltMods);
         let compiling = std::time::Instant::now();
         // The tool compiles every mod in the folder it's given: exactly the staged copies of the ones this build keeps.
@@ -2163,7 +2187,10 @@ fn pipeline(
             let keeping = std::time::Instant::now();
             match kept_store.save(&work, &built, &libraries, &plan.mods, &plan.keys) {
                 Ok(0) => {}
-                Ok(_) => timed("Keeping the mods' libraries for the next build", keeping)?,
+                Ok(_) => timed(
+                    tr("Keeping the mods' libraries for the next build"),
+                    keeping,
+                )?,
                 Err(error) => log_warning(&trf(
                     "The mods' libraries couldn't be kept for the next build: {error}",
                     &[("error", &error.to_string())],
@@ -2765,7 +2792,15 @@ pub(crate) fn copy_base(
             crate::preparer::clone_or_copy(&entry.path(), &to)
                 .and_then(|()| fs::set_permissions(&to, entry.metadata()?.permissions()))
         };
-        copied.map_err(|e| format!("Could not copy {}: {e}", entry.path().display()))?;
+        copied.map_err(|e| {
+            trf(
+                "Could not copy {file}: {error}",
+                &[
+                    ("file", &entry.path().display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            )
+        })?;
     }
     Ok(())
 }
