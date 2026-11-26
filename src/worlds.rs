@@ -582,10 +582,7 @@ pub fn lock_reviewed(worlds: &[WorldRisk]) -> Result<ReviewedWorldLocks, String>
             .and_then(|saves| saves.open_dir_nofollow(folder))
             .map_err(|e| world_error(path, e))?;
         if DirectoryIdentity::of(&dir).map_err(|e| world_error(path, e))? != world.directory {
-            return Err(world_error(
-                path,
-                crate::i18n::tr("The reviewed world directory changed"),
-            ));
+            return Err(world_error(path, "The reviewed world directory changed"));
         }
         let lock = path.join(LOCK);
         let mut options = cap_std::fs::OpenOptions::new();
@@ -648,7 +645,7 @@ fn read_level_evidence(
     if bytes.len() > limit {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            crate::i18n::tr("World evidence exceeds the save size limit"),
+            "World evidence exceeds the save size limit",
         ));
     }
     Ok(Some(LevelEvidence {
@@ -763,15 +760,7 @@ pub fn find(home: &Path, query: &str) -> Result<World, String> {
         .find(|w| w.folder == query)
         .or_else(|| all.iter().find(|w| w.name.eq_ignore_ascii_case(query)))
         .cloned()
-        .ok_or_else(|| {
-            crate::i18n::trf(
-                "No world {query} in {path}",
-                &[
-                    ("query", query),
-                    ("path", &home.join("saves").display().to_string()),
-                ],
-            )
-        })
+        .ok_or_else(|| format!("No world {query} in {}", home.join("saves").display()))
 }
 
 /// `base`, else `base (1)`, `base (2)`... from the `first` count: the first name free in `dir`
@@ -844,10 +833,7 @@ fn backup_at(
     })();
     made.map(|()| zip_path.clone()).map_err(|e| {
         let _ = fs::remove_file(&zip_path);
-        crate::i18n::trf(
-            "Could not back up {name}: {error}",
-            &[("name", &world.name), ("error", &e.to_string())],
-        )
+        format!("Could not back up {}: {e}", world.name)
     })
 }
 
@@ -1003,12 +989,8 @@ fn delete_world(world: &World) -> Result<(), String> {
     drop(lock);
     #[cfg(not(windows))]
     let _lock = lock;
-    crate::desktop_seams::to_trash(&world.path).map_err(|e| {
-        crate::i18n::trf(
-            "Could not move {name} to the trash: {error}",
-            &[("name", &world.name), ("error", &e)],
-        )
-    })
+    crate::desktop_seams::to_trash(&world.path)
+        .map_err(|e| format!("Could not move {} to the trash: {e}", world.name))
 }
 
 #[cfg(test)]

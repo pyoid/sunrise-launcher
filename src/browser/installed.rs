@@ -361,6 +361,21 @@ pub(super) fn old_pack_path(home: &Path, entry: &Entry, kind: Kind) -> Result<Pa
     pack_path(home, kind, &entry.file)
 }
 
+/// Why a pack can't go to `relative`: another browser install has it, or something else is there.
+fn taken(relative: &str, owner: Option<&Entry>) -> String {
+    match owner {
+        Some(e) => trf(
+            "{relative} belongs to {title}, installed from the browser.",
+            &[("relative", relative), ("title", &e.title)],
+        ),
+        None => trf(
+            "{relative} is already there and wasn't installed by the browser: move it \
+             away first, or keep it.",
+            &[("relative", relative)],
+        ),
+    }
+}
+
 /// Publishes a planned Modrinth pack set. The caller holds the home lock from before the read.
 fn put_packs(
     source: &dyn Source,
@@ -397,17 +412,7 @@ fn put_packs(
         let owner = installed.entries.iter().find(|e| e.file == relative);
         let ours = owner.is_some_and(|e| e.source == p.source && e.project == p.id);
         if target.exists() && !ours {
-            return Err(match owner {
-                Some(e) => trf(
-                    "{relative} belongs to {title}, installed from the browser.",
-                    &[("relative", &relative), ("title", &e.title)],
-                ),
-                None => trf(
-                    "{relative} is already there and wasn't installed by the browser: move it \
-                     away first, or keep it.",
-                    &[("relative", &relative)],
-                ),
-            });
+            return Err(taken(&relative, owner));
         }
         let line = format!("{} {}", p.title, step.version.number);
         // Stage on the destination filesystem without trusting a pre-existing partial file.

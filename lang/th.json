@@ -2837,8 +2837,6 @@
   "Could not start {path}: {error}": "Could not start {path}: {error}",
   "The reviewed world directory changed": "The reviewed world directory changed",
   "World evidence exceeds the save size limit": "World evidence exceeds the save size limit",
-  "No world {query} in {path}": "No world {query} in {path}",
-  "Could not back up {name}: {error}": "Could not back up {name}: {error}",
   "{mod} isn't ready for your game version yet. Its author needs to update it for this build.": "{mod} isn't ready for your game version yet. Its author needs to update it for this build.",
   "{mod} can't be added together with the mods this profile has.": "{mod} can't be added together with the mods this profile has.",
   "The profile or its game build changed while {mod} was being checked. Nothing was changed; try again.": "The profile or its game build changed while {mod} was being checked. Nothing was changed; try again.",
