@@ -523,6 +523,11 @@ pub(crate) const CLIENT: &str = if cfg!(windows) {
     "sunrise-client"
 };
 
+/// How many of Mojang's files are fetched at once. [`agent`] keeps this many idle connections per
+/// host, so each worker's connection goes back to the pool instead of being closed (ureq keeps
+/// one by default, and the other workers would open a new TCP and TLS connection per file).
+const DOWNLOAD_JOBS: usize = 8;
+
 /// The agent `url` is fetched with: the launcher's own user agent, through the player's proxy when
 /// one is set (`proxy`).
 pub(crate) fn agent(url: &str) -> Result<ureq::Agent, String> {
@@ -532,6 +537,7 @@ pub(crate) fn agent(url: &str) -> Result<ureq::Agent, String> {
             // A connection that goes quiet fails instead of waiting for ever.
             .timeout_connect(std::time::Duration::from_secs(15))
             .timeout_read(std::time::Duration::from_secs(60))
+            .max_idle_connections_per_host(DOWNLOAD_JOBS)
     })
 }
 
@@ -2839,7 +2845,7 @@ fn download_for(
                 sources::Os::MacOs => "osx",
                 sources::Os::Windows => "windows",
             };
-            mojang::download(pins, dir, os, 8, fetch, cancel, log).map_err(|e| {
+            mojang::download(pins, dir, os, DOWNLOAD_JOBS, fetch, cancel, log).map_err(|e| {
                 format!("\n  • Sunrise tried to download {v} from Mojang for {name}, but: {e}")
             })
         }
@@ -2890,7 +2896,7 @@ fn java(
         }
         let fetch = |url: &str| -> Result<Vec<u8>, String> { fetch_bytes_cancellable(url, stop) };
         let runtime = data_dir().join("minecraft").join("runtime");
-        mojang::java_runtime(component, &runtime, 8, &fetch, cancel, log).map_err(|e| {
+        mojang::java_runtime(component, &runtime, DOWNLOAD_JOBS, &fetch, cancel, log).map_err(|e| {
             format!("{missing}\n  • Sunrise also tried to download Minecraft's own Java from Mojang, but: {e}")
         })
     })
@@ -5678,6 +5684,10 @@ mod release_loading_tests;
 #[cfg(test)]
 #[path = "backend/java_tests.rs"]
 mod java_tests;
+
+#[cfg(test)]
+#[path = "backend/connection_reuse_tests.rs"]
+mod connection_reuse_tests;
 
 #[cfg(test)]
 mod tests {
@@ -8518,12 +8528,23 @@ esac"#
         use std::os::unix::fs::PermissionsExt;
         let work = std::env::temp_dir().join(format!("sunrise-bundle-{}", std::process::id()));
         let _ = fs::remove_dir_all(&work);
+        fs::create_dir_all(&work).unwrap();
+        let source = work.join("true.c");
+        fs::write(&source, "int main(void) { return 0; }\n").unwrap();
         let make = |dir: &Path, version: &str| {
             let app = dir.join("Sunrise.app");
             fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
             fs::create_dir_all(app.join("Contents/Resources")).unwrap();
             let bin = app.join("Contents/MacOS").join(crate::identity::EXECUTABLE);
-            fs::copy("/usr/bin/true", &bin).unwrap();
+            // Built here, not a copy of /usr/bin/true: that is an arm64e system program, which
+            // macOS stops running once re-signed ad hoc below unless System Integrity Protection is off.
+            let built = Command::new("cc")
+                .arg(&source)
+                .arg("-o")
+                .arg(&bin)
+                .status()
+                .unwrap();
+            assert!(built.success());
             fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
             fs::write(app.join("Contents/Resources/version"), version).unwrap();
             fs::write(
