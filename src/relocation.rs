@@ -193,6 +193,9 @@ pub fn run_worker() -> Option<i32> {
     }
     let target = args.next().map(PathBuf::from);
     let restart = args.next().is_some_and(|a| a == "--restart");
+    // The reopened window shows this worker's error as it was worded here, so word it in the
+    // player's language. The data hasn't moved yet: the settings are where they always were.
+    crate::i18n::set(backend::Settings::load().language());
     let result = (|| {
         let target = target
             .ok_or_else(|| tr("--relocate-data needs an empty destination folder").to_string())?;

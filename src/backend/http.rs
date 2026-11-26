@@ -55,8 +55,7 @@ pub(crate) fn get_unless_missing(url: &str) -> Result<Option<ureq::Response>, St
                 if url.starts_with("https://api.github.com/")
                     && crate::github::rate_limited(code, |h| r.header(h).map(str::to_owned)) =>
             {
-                crate::i18n::tr("GitHub's rate limit was reached. Try again in a few minutes.")
-                    .into()
+                "GitHub's rate limit was reached. Try again in a few minutes.".into()
             }
             ureq::Error::Status(code, _) => format!("{url} answered {code}"),
             ureq::Error::Transport(t) => format!("No connection: {t}"),
