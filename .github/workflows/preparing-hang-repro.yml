@@ -85,7 +85,7 @@ jobs:
           Step '07-prepare-download' @('prepare', '--download')
           Get-Content (Join-Path $env:S 'out\summary.txt')
 
-      - name: Window: start it, capture after two minutes
+      - name: The window, captured after two minutes
         if: always()
         shell: pwsh
         run: |
