@@ -2507,5 +2507,8 @@
   "Sealing the game files: {done} of {total}": "Sealing the game files: {done} of {total}",
   "Downloading Minecraft's files: {done} of {total}": "Downloading Minecraft's files: {done} of {total}",
   "Game arguments cannot override the account selected for Play.": "Game arguments cannot override the account selected for Play.",
-  "Put {mod} in {folder} as the .smod `cargo sunrise-mod build` packs from its source.": "Put {mod} in {folder} as the .smod `cargo sunrise-mod build` packs from its source."
+  "Put {mod} in {folder} as the .smod `cargo sunrise-mod build` packs from its source.": "Put {mod} in {folder} as the .smod `cargo sunrise-mod build` packs from its source.",
+  "Discard your changes?": "Discard your changes?",
+  "Keep editing": "Keep editing",
+  "Discard": "Discard"
 }
