@@ -169,7 +169,7 @@ fn staging_distinguishes_a_missing_manifest_from_an_unavailable_feed() {
 fn a_game_list_error_still_checks_the_launcher() {
     for error in [
         "No connection: offline",
-        "GitHub's rate limit was reached.",
+        "GitHub is limiting requests from your network for now. Try again in a few minutes, or on another network.",
         "invalid JSON",
         "first page answered 404",
         "first page didn't answer with a release list.",

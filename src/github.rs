@@ -8,19 +8,20 @@
 //!   anonymous 304 still counts against the hour (measured 2026-11-01), so that only saves the
 //!   download; with `SUNRISE_GITHUB_TOKEN` (CI) a 304 is free;
 //! - when GitHub answers with its rate limit (or not at all), Sunrise's own repository is read
-//!   through the mirror `SUNRISE_GITHUB_MIRROR` names, if any ([`MIRROR`]: none built in);
+//!   through the mirror `SUNRISE_GITHUB_MIRROR` names, if any ([`MIRROR`]: the registry's copy, built in);
 //! - when both fail, the last answer kept on disk is used, else the error says what happened.
 //!
 //! Release files are not read here: their `browser_download_url` (github.com, then
 //! release-assets.githubusercontent.com) is not part of the API and has no such limit.
 use crate::backend;
+use crate::i18n::tr;
 use sha2::Digest;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub(crate) const API: &str = "https://api.github.com";
-/// The built-in read-only mirror of Sunrise's release reads: none. `SUNRISE_GITHUB_MIRROR` names one.
-pub const MIRROR: &str = "";
+/// The built-in read-only mirror of Sunrise's release reads: the registry's copy. `SUNRISE_GITHUB_MIRROR` names another.
+pub const MIRROR: &str = sunrise_launcher_addresses::GITHUB_MIRROR;
 
 /// How long a saved answer is used without asking again: the launcher looks for releases every
 /// [`backend::CHECK_EVERY`], so a few minutes late at worst.
@@ -166,6 +167,7 @@ fn page_with(
         .as_ref()
         .map(|k| k.etag.as_str())
         .filter(|e| !e.is_empty());
+    let mut limited = false;
     let why = match github(url, etag) {
         Answer::Fresh(page, etag) => {
             write_kept(&file, url, etag.as_deref().unwrap_or(""), &page, now);
@@ -181,20 +183,19 @@ fn page_with(
             None => "GitHub answered 304 without a saved copy".to_owned(),
         },
         Answer::NotFound => return Ok(None),
-        Answer::RateLimited => RATE_LIMITED.to_owned(),
+        Answer::RateLimited => {
+            limited = true;
+            "GitHub rate-limited this network".to_owned()
+        }
         Answer::Failed(e) => e,
     };
     let from_mirror = match mirror_url_with(url, mirror_base) {
         Some(m) => match mirror(&m) {
             Answer::Fresh(mut page, _) => {
-                // A JSON-only mirror may omit GitHub's Link header. Only there, probe the
-                // next page after a full page rather than assume the rest doesn't exist.
-                if paginated && page.next.is_none() {
-                    page.next = Some(
-                        page.body
-                            .as_array()
-                            .is_some_and(|rows| rows.len() == RELEASES_PER_PAGE),
-                    );
+                // The mirror's copy is the complete list in one file, and a static host
+                // ignores `&page=2`: never ask it for another page.
+                if paginated {
+                    page.next = Some(false);
                 }
                 // The launcher's own releases are never kept from a mirror.
                 if !launcher {
@@ -214,6 +215,14 @@ fn page_with(
             return Ok(Some(k.page));
         }
     }
+    if limited {
+        if let Some(m) = &from_mirror {
+            crate::launcher_log::line(format!(
+                "{url}: GitHub rate-limited; the mirror failed: {m}"
+            ));
+        }
+        return Err(tr("GitHub is limiting requests from your network for now. Try again in a few minutes, or on another network.").to_owned());
+    }
     Err(match from_mirror {
         Some(m) => format!(
             "{why}, and Sunrise's mirror of GitHub couldn't help either ({m}). Try again in a few minutes."
@@ -221,8 +230,6 @@ fn page_with(
         None => why,
     })
 }
-
-const RATE_LIMITED: &str = "GitHub's rate limit was reached for your network";
 
 /// Whether `url` is an API address of the launcher's own repository.
 fn launcher_url(url: &str) -> bool {
