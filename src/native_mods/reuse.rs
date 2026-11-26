@@ -7,10 +7,12 @@
 //! version out as planning does, but from the SDK indexes already kept on disk and nothing
 //! fetched, and then proves the build installed under it is the one that version names:
 //!
-//! - the build's [`EVIDENCE`], written by the planned path from its verified plan once the build
-//!   was installed or used again, holds the plan's inputs that change the build without being in
-//!   its version ([`Image`]: the pins, the Cargo and dispatch orders, the mods left out and the
-//!   digest of each SDK index read). They must be the ones the lookup works out.
+//! - the build's [`EVIDENCE`], first sealed by the planned path right after its verified outputs
+//!   were published, holds the plan's inputs that change the build without being in its version
+//!   ([`Image`]: the pins, the Cargo and dispatch orders, the mods left out, the digest of each
+//!   SDK index read and the identity of the SDK the build compiles against ([`BuildSdk`])).
+//!   They must be the ones the lookup works out. An installed build with no evidence is never
+//!   sealed afterwards: a capture proves what is on disk now, not what built it.
 //! - The rules that admitted the plan without changing the build ([`Admission`]: the launcher's
 //!   own checks, the base, an exact profile build, the SDK base) must be the lookup's.
 //! - The build's record (`native-mods.json`) and its installed mods must be the plan's
@@ -18,8 +20,9 @@
 //! - The installed game must still be the one the evidence sealed ([`Artifact`]: the executable
 //!   and every file it loads beside itself).
 //!
-//! Then the profile is read again, and the mods' folder is compared with the copy: a change while
-//! the build was proved misses. Anything else, or a missing, torn or unknown evidence file, plans
+//! Then the profile is read again, and the mods' folder is hashed as the version hashes the mods
+//! ([`hash_bundles`], in order, uses tables included) and compared with the copy as it was taken:
+//! a change while the build was proved misses. Anything else, or a missing, torn or unknown evidence file, plans
 //! the build as before.
 use super::*;
 use crate::managed_play::Artifact;
@@ -27,6 +30,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Beside an installed client build: what the fast path proves it with ([`Evidence`]).
 pub(super) const EVIDENCE: &str = ".native-reuse.json";
+
+/// What the launcher before this one kept beside a build. Never read, and never carried into
+/// a new build, where an older launcher could take it for the new build's evidence.
+pub(super) const OLDER_EVIDENCE: &str = ".native-inputs";
 
 /// The evidence's layout. An unknown layout is unreadable, not missing.
 const SCHEMA: u32 = 1;
@@ -52,11 +59,71 @@ pub(super) struct Image {
     sdk: BTreeMap<String, String>,
     /// The SHA-256 of the developer SDK's index, when a pin was read from it.
     local_sdk: Option<String>,
+    /// The SDK the build compiles against, whether or not any pin was read from it.
+    build_sdk: BuildSdk,
+}
+
+/// The identity of the SDK a build compiles against.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub(super) enum BuildSdk {
+    /// A signed SDK release: the build commit and the SHA-256 of its index as signed.
+    Signed { commit: String, sha256: String },
+    /// A developer's prebuilt game: the SHA-256 of its `sunrise-prebuilt.json`, which lists the
+    /// digest of every file of the package.
+    Local { sha256: String },
+}
+
+/// What the developer's prebuilt game folder ([`sdk_cache::DEVELOPER_SDK`]) names its package by
+/// (`tools/prebuilt_game.py build`).
+const PREBUILT_IDENTITY: &str = "sunrise-prebuilt.json";
+
+/// The SDK selected for a build, carried through its plan: the one its identity is recorded
+/// from is the one it is built with.
+#[derive(Clone, Debug)]
+pub(super) enum Chosen {
+    Signed(sdk_cache::Sdk),
+    Local { folder: PathBuf, sha256: String },
+}
+
+impl Chosen {
+    /// A developer base's own prebuilt game in `local` when it has one, else `release`, the
+    /// signed SDK of the build, else the one `published` gives (a developer commit's release).
+    pub(super) fn select(
+        local: Option<&Path>,
+        release: Option<sdk_cache::Sdk>,
+        published: impl FnOnce() -> Result<sdk_cache::Sdk, Failed>,
+    ) -> Result<Self, Failed> {
+        if let Some(folder) = local {
+            let path = folder.join(PREBUILT_IDENTITY);
+            let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            return Ok(Self::Local {
+                folder: folder.to_owned(),
+                sha256: sunrise_launcher_release_verify::sha256_hex(&bytes),
+            });
+        }
+        match release {
+            Some(sdk) => Ok(Self::Signed(sdk)),
+            None => published().map(Self::Signed),
+        }
+    }
+
+    fn identity(&self) -> BuildSdk {
+        match self {
+            Self::Signed(sdk) => BuildSdk::Signed {
+                commit: sdk.commit().to_owned(),
+                sha256: sdk.signed().to_owned(),
+            },
+            Self::Local { sha256, .. } => BuildSdk::Local {
+                sha256: sha256.clone(),
+            },
+        }
+    }
 }
 
 impl Image {
     /// `mods` (the kept mods, with their `pins`), in `link` order and `dispatch` order, with
-    /// `left_out` left out and the indexes `read`.
+    /// `left_out` left out, the indexes `read` and the SDK `chosen` to compile against.
     pub(super) fn new(
         mods: &[Bundle],
         pins: &[String],
@@ -64,6 +131,7 @@ impl Image {
         dispatch: &[String],
         left_out: &[LeftOut],
         read: &mixins::Read,
+        chosen: &Chosen,
     ) -> Self {
         let mut left: Vec<String> = left_out.iter().map(|left| left.id.clone()).collect();
         left.sort_unstable();
@@ -81,6 +149,7 @@ impl Image {
             left_out: left,
             sdk: read.sdk.clone(),
             local_sdk: read.local.clone(),
+            build_sdk: chosen.identity(),
         }
     }
 }
@@ -150,7 +219,7 @@ pub(super) struct Evidence {
 }
 
 impl Evidence {
-    /// Missing evidence allows first adoption; unreadable evidence does not.
+    /// Missing evidence is `None`; unreadable evidence is an error.
     fn read(dir: &Path) -> Result<Option<Self>, ()> {
         let bytes = match fs::read(dir.join(EVIDENCE)) {
             Ok(bytes) => bytes,
@@ -164,32 +233,39 @@ impl Evidence {
         Ok(Some(evidence))
     }
 
-    /// Prove the installed mods and game are this plan's. Only a build with no evidence may
-    /// take a new seal, and only if its artifact can be captured.
+    /// Prove the installed mods and game are this plan's: the build's own evidence names this
+    /// image and its game is still the sealed one. A build with no evidence is never proved, and
+    /// never sealed here.
     fn prove(version: &str, contents: &Contents<'_>, image: &Image) -> Option<Self> {
         if !contents.installed_in(version) {
             return None;
         }
         let dir = Target::Client.directory(version);
-        let old = Self::read(&dir).ok()?;
-        if old
-            .as_ref()
-            .is_some_and(|old| old.version != version || old.image != *image)
-        {
+        let evidence = Self::read(&dir).ok()??;
+        if evidence.version != version || evidence.image != *image {
             return None;
         }
         let seal = Artifact::capture_at(version, &dir).ok()?;
-        match old {
-            Some(old) if old.seal == seal => Some(old),
-            Some(_) => None,
-            None => Some(Self {
-                schema: SCHEMA,
-                version: version.to_owned(),
-                image: image.clone(),
-                seal,
-                admitted: Vec::new(),
-            }),
+        (evidence.seal == seal).then_some(evidence)
+    }
+
+    /// The first seal of a build this launcher has just published: its installed mods are the
+    /// plan's, it has no evidence yet, and its game can be captured.
+    fn seal(version: &str, contents: &Contents<'_>, image: &Image) -> Option<Self> {
+        if !contents.installed_in(version) {
+            return None;
         }
+        let dir = Target::Client.directory(version);
+        if !matches!(Self::read(&dir), Ok(None)) {
+            return None;
+        }
+        Some(Self {
+            schema: SCHEMA,
+            version: version.to_owned(),
+            image: image.clone(),
+            seal: Artifact::capture_at(version, &dir).ok()?,
+            admitted: Vec::new(),
+        })
     }
 }
 
@@ -278,9 +354,9 @@ impl Contents<'_> {
 const VERSIONS_TRIED: usize = 8;
 
 /// The versions a client plan installs as, in order: its own (`version_for`), then one after
-/// another while a build under the one before is installed but doesn't hold the plan
-/// ([`Evidence::prove`]). Such a build is never used for the plan, sealed again, or replaced
-/// while something may still run it: the plan tries the next version in the same sequence.
+/// another. A build installed under one that doesn't hold the plan ([`Evidence::prove`]) is never
+/// used for the plan, sealed, or replaced while something may still run it: the plan goes on to
+/// the next version in the same sequence.
 pub(super) fn versions(version: &str) -> impl Iterator<Item = String> + '_ {
     (0..VERSIONS_TRIED).map(move |n| {
         if n == 0 {
@@ -301,31 +377,52 @@ pub(super) fn versions(version: &str) -> impl Iterator<Item = String> + '_ {
     })
 }
 
-/// The first free slot or installed build that holds this plan, in version order.
-fn slot(
-    version: &str,
-    contents: &Contents<'_>,
-    image: &Image,
-) -> Option<(String, Option<Evidence>)> {
-    versions(version).find_map(|candidate| {
-        if !installed(&candidate) {
-            return Some((candidate, None));
-        }
-        let evidence = Evidence::prove(&candidate, contents, image)?;
-        Some((candidate, Some(evidence)))
-    })
+/// Where a plan goes in the version sequence.
+enum Slot {
+    /// An installed build that holds the plan.
+    Proved(String, Evidence),
+    /// A path nothing is at: publication can take it.
+    Vacant(String),
 }
 
-/// The version the client plan installs as ([`versions`]), with proof if it can be used again.
+/// The installed build that holds this plan, wherever it is in the version sequence; failing
+/// that, the first vacant path. A path that is anything at all (a directory without its
+/// completion marker, a file, a link, one that can't be read) is not vacant: publication
+/// refuses it.
+fn slot(version: &str, contents: &Contents<'_>, image: &Image) -> Option<Slot> {
+    let mut vacant = None;
+    for candidate in versions(version) {
+        let path = Target::Client.directory(&candidate);
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                vacant.get_or_insert(candidate);
+            }
+            _ if installed(&candidate) => {
+                if let Some(evidence) = Evidence::prove(&candidate, contents, image) {
+                    return Some(Slot::Proved(candidate, evidence));
+                }
+            }
+            _ => {}
+        }
+    }
+    vacant.map(Slot::Vacant)
+}
+
+/// The version the client plan installs as ([`versions`]), with proof if an installed build
+/// holds it.
 pub(super) fn installable(
     version: &str,
     contents: &Contents<'_>,
     image: &Image,
 ) -> Result<(String, Option<Evidence>), Failed> {
-    slot(version, contents, image).ok_or_else(|| Failed::Other(trf(
-        "Every installed build named for these mods ({version}) holds other mods or was changed after it was installed. Remove them, then build again.",
-        &[("version", version)],
-    )))
+    match slot(version, contents, image) {
+        Some(Slot::Proved(version, evidence)) => Ok((version, Some(evidence))),
+        Some(Slot::Vacant(version)) => Ok((version, None)),
+        None => Err(Failed::Other(trf(
+            "Every installed build named for these mods ({version}) holds other mods or was changed after it was installed. Remove them, then build again.",
+            &[("version", version)],
+        ))),
+    }
 }
 
 fn installed(version: &str) -> bool {
@@ -335,19 +432,26 @@ fn installed(version: &str) -> bool {
         .is_file()
 }
 
-/// Keep the admission on the same image and seal proved by [`installable`]. A newly published
-/// build has no proof yet, so verify its installation first. A failure costs only the next
+/// The first seal of a build just published for the plan, kept with its admission. Only the
+/// verified publication of this launcher's own outputs calls it. A failure costs only the next
 /// build's planning.
-pub(super) fn record(
+pub(super) fn seal_published(
     version: &str,
     contents: &Contents<'_>,
     image: &Image,
     admission: Admission,
-    evidence: Option<Evidence>,
 ) {
-    let Some(mut evidence) = evidence.or_else(|| Evidence::prove(version, contents, image)) else {
-        return;
-    };
+    if let Some(evidence) = Evidence::seal(version, contents, image) {
+        keep(evidence, admission);
+    }
+}
+
+/// The admission added to the proved evidence of a build the plan uses again.
+pub(super) fn admit(evidence: Evidence, admission: Admission) {
+    keep(evidence, admission);
+}
+
+fn keep(mut evidence: Evidence, admission: Admission) {
     let admitted = &mut evidence.admitted;
     admitted.retain(|old| *old != admission);
     admitted.push(admission);
@@ -368,6 +472,8 @@ pub(super) struct Request<'a> {
     pub(super) profile: Profile,
     pub(super) target: Target,
     pub(super) options: &'a BuildOptions<'a>,
+    /// The developer base's own prebuilt game ([`sdk_cache::DEVELOPER_SDK`]), for a developer base.
+    pub(super) local_sdk: Option<&'a Path>,
 }
 
 /// What planning would make of a request, worked out without fetching or checking anything.
@@ -408,6 +514,7 @@ fn derive(request: &Request<'_>, requested: &[Bundle]) -> Option<Derived> {
         profile,
         target,
         options,
+        local_sdk,
     } = *request;
     let side = side_of(target);
     let (left_out, mods, declared) = kept_mods(requested, options.skip, side);
@@ -425,18 +532,27 @@ fn derive(request: &Request<'_>, requested: &[Bundle]) -> Option<Derived> {
         .iter()
         .map(|&i| mods.get(i).cloned())
         .collect::<Option<Vec<_>>>()?;
-    let revision = build_revision(base, built_on).ok()?;
     let origin = built_on.map_or(base, |about| about.base.as_str());
     let developer = crate::developer_install::is_developer(origin);
+    // Only what is kept: a release's build id is fetched by the planner, never by a lookup.
+    let revision = match built_on {
+        Some(about) => about.sunrise.clone(),
+        None if developer => crate::developer_install::revision(base).ok()?,
+        None => sdk_cache::kept_build_of(base)?,
+    };
     let sdk = match developer {
         true if mismatch(&mods, &revision).is_some() => return None,
         true => None,
         false => Some(sdk_cache::kept(&revision)?),
     };
-    let (pins, mut read) = kept_pins(&mods, sdk.as_ref(), developer_sdk(developer).as_deref())?;
+    let (pins, mut read) = kept_pins(&mods, sdk.as_ref(), local_sdk)?;
     if let Some(sdk) = &sdk {
         read.sdk.insert(revision.clone(), sdk.signed().to_owned());
     }
+    let chosen = Chosen::select(local_sdk, sdk, || {
+        sdk_cache::kept(&revision).ok_or_else(|| Failed::Other(String::new()))
+    })
+    .ok()?;
     for (bundle, pin) in mods.iter().zip(&pins) {
         mixins::materialize(bundle, &bundle.dir, pin).ok()?;
     }
@@ -460,7 +576,7 @@ fn derive(request: &Request<'_>, requested: &[Bundle]) -> Option<Derived> {
     )
     .ok()?;
     Some(Derived {
-        image: Image::new(&mods, &pins, &ordered, &dispatch, &left_out, &read),
+        image: Image::new(&mods, &pins, &ordered, &dispatch, &left_out, &read, &chosen),
         admission: Admission::new(base, origin, options.exact_home.is_some()),
         version,
         revision,
@@ -489,6 +605,13 @@ pub(super) fn lookup(request: &Request<'_>, requested: &[Bundle]) -> Option<Hit>
         .iter()
         .map(|bundle| (bundle.manifest.id.clone(), source_digest(bundle)))
         .collect();
+    // The mods as the version hashes them, before the copies are given their pins.
+    let inputs = |bundles: &[Bundle]| {
+        let mut hash = Sha256::new();
+        hash_bundles(&mut hash, bundles).ok()?;
+        Some(hash.finalize())
+    };
+    let raw = inputs(requested)?;
     let derived = derive(request, requested)?;
     let contents = Contents {
         revision: &derived.revision,
@@ -500,22 +623,20 @@ pub(super) fn lookup(request: &Request<'_>, requested: &[Bundle]) -> Option<Hit>
         left_out: &derived.left_out,
     };
     // Check admission on the same evidence that proved the image and seal.
-    let (version, evidence) = slot(&derived.version, &contents, &derived.image)?;
-    if !evidence?.admitted.contains(&derived.admission) {
+    let Slot::Proved(version, evidence) = slot(&derived.version, &contents, &derived.image)? else {
+        return None;
+    };
+    if !evidence.admitted.contains(&derived.admission) {
         return None;
     }
     // Read again: a profile, override or kept index that changed meanwhile, or a mod changed in
     // the folder since it was copied, is another build.
     let unchanged = || {
         derive(request, requested).as_ref() == Some(&derived)
-            && scan_bundles(request.folder).is_ok_and(|found| {
-                found.len() == digests.len()
-                    && found.iter().all(|bundle| {
-                        digests
-                            .get(&bundle.manifest.id)
-                            .is_some_and(|digest| *digest == source_digest(bundle))
-                    })
-            })
+            && scan_bundles(request.folder)
+                .ok()
+                .and_then(|found| inputs(&found))
+                .is_some_and(|now| now == raw)
     };
     unchanged().then(|| Hit {
         version,
@@ -587,6 +708,8 @@ pub(super) fn before_planning(
         }
         requested.push(Bundle { dir, ..bundle });
     }
+    let origin = built_on.as_ref().map_or(base, |about| about.base.as_str());
+    let local_sdk = developer_sdk(crate::developer_install::is_developer(origin));
     let request = Request {
         base,
         folder,
@@ -595,6 +718,7 @@ pub(super) fn before_planning(
         profile,
         target: Target::Client,
         options,
+        local_sdk: local_sdk.as_deref(),
     };
     find(&request, &requested, progress, started)
 }

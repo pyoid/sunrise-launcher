@@ -1608,6 +1608,8 @@ fn pipeline(
     }
     // A native build starts from the release or Nightly it was made from, on its own revision.
     let origin = built_on.as_ref().map_or(base, |a| a.base.as_str());
+    let developer = crate::developer_install::is_developer(origin);
+    let local_sdk = developer_sdk(developer);
     let copying = std::time::Instant::now();
     let mut ids = std::collections::HashSet::new();
     for b in &found {
@@ -1639,6 +1641,7 @@ fn pipeline(
         profile,
         target,
         options: &options,
+        local_sdk: local_sdk.as_deref(),
     };
     if let Some(built) = reuse::find(&request, &requested, progress, started)? {
         return Ok(built);
@@ -1659,8 +1662,6 @@ fn pipeline(
     let ids: Vec<&str> = mods.iter().map(|b| b.manifest.id.as_str()).collect();
     log_internals(&ordered)?;
     let revision = build_revision(base, built_on.as_ref())?;
-    let developer = crate::developer_install::is_developer(origin);
-    let local_sdk = developer_sdk(developer);
     let sdk_base = sdk_cache::Base::from_env();
     let keys = sunrise_launcher_release_verify::sdk_keys_for(backend::GAME_REPO);
     // A developer install's checkout has no published surface to test against: its mods are
@@ -1708,6 +1709,12 @@ fn pipeline(
     if let Some(sdk) = &sdk {
         read.sdk.insert(revision.clone(), sdk.signed().to_owned());
     }
+    // The SDK the build compiles against, selected once: its identity is what a reused build is
+    // proved by, and this selection is what builds it. A developer base's own prebuilt game, else
+    // the signed SDK (the commit's release for a developer base without one).
+    let chosen = reuse::Chosen::select(local_sdk.as_deref(), sdk.clone(), || {
+        Ok(sdk_cache::index(&sdk_base, &revision, &keys)?)
+    })?;
     // Give older SDK tools the exact pin they require, and hash the same inputs we build.
     // Only the incoming copies change; the recorded source digests still name the originals.
     for (bundle, pin) in mods.iter().zip(&mixins_pins) {
@@ -1887,24 +1894,31 @@ fn pipeline(
         left_out: &left_out,
     };
     // Reuse a client build only when it holds this plan's image; otherwise try the next slot.
-    let image = (target == Target::Client)
-        .then(|| reuse::Image::new(&mods, &mixins_pins, &ordered, &dispatch, &left_out, &read));
+    let image = (target == Target::Client).then(|| {
+        reuse::Image::new(
+            &mods,
+            &mixins_pins,
+            &ordered,
+            &dispatch,
+            &left_out,
+            &read,
+            &chosen,
+        )
+    });
     let (version, evidence) = match &image {
         Some(image) => reuse::installable(&version, &contents, image)?,
         None => (version, None),
     };
     let exists = evidence.is_some()
         || (target == Target::Server && target.directory(&version).join(".installed").is_file());
-    // Keep the admission with the proof of this client's installed image.
+    // A build used again keeps its admission with its proof. The first seal is written only from
+    // the build this launcher has just published.
     let record = || {
-        if let Some(image) = &image {
-            reuse::record(
-                &version,
-                &contents,
-                image,
-                reuse::Admission::new(base, origin, options.exact_home.is_some()),
-                evidence,
-            );
+        let Some(image) = &image else { return };
+        let admission = reuse::Admission::new(base, origin, options.exact_home.is_some());
+        match evidence {
+            Some(evidence) => reuse::admit(evidence, admission),
+            None => reuse::seal_published(&version, &contents, image, admission),
         }
     };
     if let Some(stage) = options.staging {
@@ -1927,8 +1941,8 @@ fn pipeline(
             )
             .into());
         }
-        let package = match (local_sdk, &sdk) {
-            (Some(local), _) => {
+        let package = match &chosen {
+            reuse::Chosen::Local { folder, .. } => {
                 let program = sdk_cache::developer_tool(true).ok_or_else(|| {
                         trf(
                             "A developer base's own SDK needs its own native build tool: build cargo-sunrise-mod from the same checkout and set {variable} to it.",
@@ -1937,7 +1951,7 @@ fn pipeline(
                     })?;
                 let laying = std::time::Instant::now();
                 let package =
-                    sdk_cache::developer(&program, &revision, target, &local, cancellation)?;
+                    sdk_cache::developer(&program, &revision, target, folder, cancellation)?;
                 timed("Laying out the developer SDK", laying)?;
                 (
                     package, program, None,
@@ -1945,17 +1959,9 @@ fn pipeline(
                     None,
                 )
             }
-            (None, sdk) => {
+            reuse::Chosen::Signed(sdk) => {
                 // A developer install without its own prebuilt game uses its commit's SDK
                 // release, when one is published.
-                let fetched;
-                let sdk = match sdk {
-                    Some(sdk) => sdk,
-                    None => {
-                        fetched = sdk_cache::index(&sdk_base, &revision, &keys)?;
-                        &fetched
-                    }
-                };
                 let shown = sdk.shown();
                 // Nothing to fetch (every slice kept from an earlier build) is said as such,
                 // never as a download of nothing.
@@ -2852,6 +2858,7 @@ fn carried_over(name: &std::ffi::OsStr, target: Target) -> bool {
     own.push(backend::CLIENT.to_string());
     own.push(".installed".to_string());
     own.push(reuse::EVIDENCE.to_string());
+    own.push(reuse::OLDER_EVIDENCE.to_string());
     if target == Target::Server {
         own.push("sunrise-engine".to_string());
     }
@@ -3851,10 +3858,18 @@ mod tests {
         fs::create_dir_all(source.join(".local/sunrise-client/26.3")).unwrap();
         fs::write(source.join(".local/sunrise-client/26.3/data"), b"prepared").unwrap();
         fs::write(source.join("sunrise-ctl"), b"control").unwrap();
+        for evidence in [reuse::EVIDENCE, reuse::OLDER_EVIDENCE] {
+            fs::write(source.join(evidence), b"inherited").unwrap();
+        }
         copy_base(&source, &client, Target::Client, true).unwrap();
         copy_base(&source, &server, Target::Server, false).unwrap();
         assert!(!client.join(".local").exists());
         assert_eq!(fs::read(client.join("sunrise-ctl")).unwrap(), b"control");
+        for evidence in [reuse::EVIDENCE, reuse::OLDER_EVIDENCE] {
+            for copy in [&client, &server] {
+                assert!(!copy.join(evidence).exists(), "{evidence}");
+            }
+        }
         assert_eq!(
             fs::read(server.join(".local/sunrise-client/26.3/data")).unwrap(),
             b"prepared"
@@ -3871,6 +3886,7 @@ mod tests {
             backend::CLIENT,
             ".installed",
             reuse::EVIDENCE,
+            reuse::OLDER_EVIDENCE,
             "native-mods.json",
             "native-data",
         ] {

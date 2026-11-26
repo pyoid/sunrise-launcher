@@ -55,6 +55,8 @@ struct Set {
     platform: BuildPlatform,
     /// The SDK base setting its plans are admitted under.
     sdk_base: Option<String>,
+    /// The developer's own prebuilt game its plans compile against, if it has one.
+    local_sdk: Option<PathBuf>,
 }
 
 impl Set {
@@ -100,6 +102,7 @@ impl Set {
             built_on,
             platform: BuildPlatform::default(),
             sdk_base: None,
+            local_sdk: None,
         }
     }
 
@@ -111,6 +114,15 @@ impl Set {
     fn on(mut self, platform: BuildPlatform) -> Self {
         self.platform = platform;
         self
+    }
+
+    /// The same set, compiled against a developer's prebuilt game folder whose package file
+    /// names it as `package`.
+    fn against(&mut self, package: &str) {
+        let folder = self.root.join("prebuilt");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join(PREBUILT_IDENTITY), package).unwrap();
+        self.local_sdk = Some(folder);
     }
 
     /// The instance's overrides file.
@@ -149,6 +161,7 @@ impl Set {
             profile: Profile::Optimized,
             target: Target::Client,
             options,
+            local_sdk: self.local_sdk.as_deref(),
         }
     }
 
@@ -214,23 +227,25 @@ impl Set {
             digests: &digests,
             left_out: &left_out,
         };
-        let image = Image::new(&mods, &pins, &ordered, &dispatch, &left_out, &read);
+        let chosen = Chosen::select(self.local_sdk.as_deref(), sdk, || {
+            Ok(sdk_cache::index(&sdk_base, self.revision, &keys)?)
+        })
+        .unwrap();
+        let image = Image::new(&mods, &pins, &ordered, &dispatch, &left_out, &read, &chosen);
         let (version, evidence) = installable(&version, &contents, &image).unwrap();
-        if evidence.is_none() {
-            self.publish(&version, &mixins, &left_out, &mods, &ordered, &digests);
-        }
-        super::record(
-            &version,
-            &contents,
-            &image,
-            Admission::with_sdk_base(
-                &self.base,
-                &self.origin,
-                options.exact_home.is_some(),
-                self.sdk_base.as_deref().map(std::ffi::OsStr::new),
-            ),
-            evidence,
+        let admission = Admission::with_sdk_base(
+            &self.base,
+            &self.origin,
+            options.exact_home.is_some(),
+            self.sdk_base.as_deref().map(std::ffi::OsStr::new),
         );
+        match evidence {
+            Some(evidence) => admit(evidence, admission),
+            None => {
+                self.publish(&version, &mixins, &left_out, &mods, &ordered, &digests);
+                seal_published(&version, &contents, &image, admission);
+            }
+        }
         version
     }
 
@@ -535,9 +550,9 @@ fn a_reduced_build_never_satisfies_the_whole_set() {
 }
 
 /// No evidence, or the record of the launcher before this one (`.native-inputs`), finds
-/// nothing; the plan then seals the build as it is, once. Evidence that can't be read (torn,
-/// another layout, an unknown field) is never sealed again: the plan installs under the next
-/// version.
+/// nothing, and the build is never sealed afterwards: the plan installs under the next version
+/// and leaves the old one as it is. Evidence that can't be read (torn, another layout, an
+/// unknown field) is the same.
 #[test]
 fn missing_torn_or_older_evidence_plans_the_build() {
     let _guard = scratch_state();
@@ -548,9 +563,13 @@ fn missing_torn_or_older_evidence_plans_the_build() {
     let older = backend::version_dir(&version).join(".native-inputs");
     fs::write(&older, "0123\n").unwrap();
     assert!(set.found().is_none(), "no evidence");
-    assert_eq!(set.install(&BuildOptions::default()), version);
-    assert_eq!(set.found().as_deref(), Some(version.as_str()));
-    let _ = fs::remove_dir_all(backend::version_dir(&version));
+    let next = set.install(&BuildOptions::default());
+    assert_ne!(next, version, "built under the next version");
+    assert!(!path.exists(), "the unproved build isn't sealed");
+    assert_eq!(set.found().as_deref(), Some(next.as_str()));
+    for version in [version, next] {
+        let _ = fs::remove_dir_all(backend::version_dir(&version));
+    }
 
     let torn = |text: &[u8]| text[..text.len() / 2].to_vec();
     let schema = |text: &[u8]| {
@@ -928,19 +947,27 @@ fn the_default_build_never_takes_a_reduced_or_changed_build() {
         "the reduced build isn't sealed"
     );
 
-    // A legacy build with all its mods and records, but no readable executable to seal.
-    let set = Set::developer("reuse-legacy-no-game", DEVELOPER).on(platform);
+    // A legacy build with all its mods and records but no evidence is never sealed, whatever
+    // its executable reads as now: a capture proves what is on disk, not what built it.
+    let set = Set::developer("reuse-legacy-no-evidence", DEVELOPER).on(platform);
     let version = set.install(&BuildOptions::default());
     fs::remove_file(set.evidence(&version)).unwrap();
     let game = backend::version_dir(&version).join(backend::CLIENT);
     fs::remove_file(&game).unwrap();
-    for (case, is_dir) in [
-        ("missing executable", false),
-        ("directory at executable path", true),
+    type Change = dyn Fn(&Path);
+    let readable: &Change = &|game| fs::write(game, game_executable()).unwrap();
+    let changed: &Change = &|game| fs::write(game, b"another game").unwrap();
+    let missing: &Change = &|_| {};
+    let directory: &Change = &|game| fs::create_dir(game).unwrap();
+    for (case, put) in [
+        ("readable executable", readable),
+        ("changed readable executable", changed),
+        ("missing executable", missing),
+        ("directory at executable path", directory),
     ] {
-        if is_dir {
-            fs::create_dir(&game).unwrap();
-        }
+        let _ = fs::remove_file(&game);
+        let _ = fs::remove_dir(&game);
+        put(&game);
         let (built, _, steps) = build_default(&set, &instance);
         assert!(
             built.is_err(),
@@ -983,4 +1010,94 @@ fn the_default_build_never_takes_a_reduced_or_changed_build() {
             "{attempt}: the changed game isn't sealed"
         );
     }
+}
+
+/// A matching build is found wherever it is in the version sequence, past a hole and past a
+/// slot that holds a directory without its completion marker, and a plan that has to build
+/// takes the first path nothing is at: never one publication would refuse (a directory without
+/// its marker, a file).
+#[test]
+fn a_matching_build_is_found_past_a_hole_and_an_occupied_slot() {
+    let _guard = scratch_state();
+    let set = Set::new("reuse-holes");
+    let options = BuildOptions::default();
+    let game = |version: &str| backend::version_dir(version).join(backend::CLIENT);
+    let first = set.install(&options);
+    fs::write(game(&first), b"changed").unwrap();
+    let second = set.install(&options);
+    fs::write(game(&second), b"changed").unwrap();
+    let third = set.install(&options);
+    assert_eq!(versions(&first).nth(2).as_deref(), Some(third.as_str()));
+
+    // The first slot loses its marker, and the second is gone.
+    fs::remove_file(backend::version_dir(&first).join(".installed")).unwrap();
+    fs::remove_dir_all(backend::version_dir(&second)).unwrap();
+    assert_eq!(set.found().as_deref(), Some(third.as_str()));
+    assert_eq!(set.install(&options), third, "used again, nothing built");
+    assert!(!backend::version_dir(&second).exists());
+
+    // A file at the hole isn't a vacancy either: the next path is.
+    fs::write(backend::version_dir(&second), b"").unwrap();
+    fs::write(game(&third), b"changed").unwrap();
+    assert!(set.found().is_none());
+    let fourth = set.install(&options);
+    assert_eq!(versions(&first).nth(3).as_deref(), Some(fourth.as_str()));
+    assert!(backend::version_dir(&second).is_file());
+
+    // With the hole free again, it is the first vacant path, and the markerless slot is untouched.
+    fs::remove_file(backend::version_dir(&second)).unwrap();
+    fs::write(game(&fourth), b"changed").unwrap();
+    assert_eq!(set.install(&options), second);
+    assert!(!backend::version_dir(&first).join(".installed").exists());
+    for version in [first, second, third, fourth] {
+        let _ = fs::remove_dir_all(backend::version_dir(&version));
+    }
+}
+
+/// The SDK a developer build compiles against is part of its image, with every pin explicit: a
+/// build made against the published SDK is not the one made against the developer's own
+/// prebuilt game, or against another package in the same folder, and each is found again by its
+/// own SDK. An ordinary build never plays a build made against another one.
+#[test]
+fn the_sdk_a_build_compiles_against_is_part_of_its_image() {
+    if !in_child(
+        "native_mods::reuse::tests::the_sdk_a_build_compiles_against_is_part_of_its_image",
+        "SUNRISE_REUSE_SDK_IDENTITY_CHILD",
+    ) {
+        return;
+    }
+    const DEVELOPER: &str = "developer-reuse";
+    let developer = format!(r#"{{"revision":"{PINNED}"}}"#);
+    let instance = install_base(DEVELOPER, &[("developer.json", developer)]);
+    keep_index(PINNED, "2026-11-13");
+    let options = BuildOptions::default();
+    let mut set =
+        Set::developer("reuse-sdk-identity", DEVELOPER).on(platform_for_game(DEVELOPER).unwrap());
+
+    // Only a build made against the developer's package exists: an ordinary build can't use it.
+    set.against("package one");
+    let local = set.install(&options);
+    assert_eq!(set.found().as_deref(), Some(local.as_str()));
+    let (built, _, steps) = build_default(&set, &instance);
+    assert!(built.is_err(), "the next slot is built: {built:?}");
+    assert!(!steps
+        .iter()
+        .any(|step| matches!(step, Step::Plan(Plan::UpToDate, _))));
+    assert_eq!(instances::find("sunrise").unwrap().version, None);
+
+    set.local_sdk = None;
+    assert!(set.found().is_none(), "the published SDK isn't the package");
+    let published = set.install(&options);
+    assert_ne!(published, local, "another slot");
+    assert_eq!(set.found().as_deref(), Some(published.as_str()));
+    set.against("package one");
+    assert_eq!(set.found().as_deref(), Some(local.as_str()));
+    set.against("package two");
+    assert!(set.found().is_none(), "another package in the same folder");
+
+    let (built, _, _) = build_default(&set, &instance);
+    assert!(
+        matches!(&built, Ok(ClientBuild::Native(found)) if *found == published),
+        "{built:?}"
+    );
 }
