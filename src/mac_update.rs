@@ -105,7 +105,9 @@ fn replace_bundle_with(
     mut signature: impl FnMut(&Path) -> bool,
     unused: impl FnMut(&Path) -> bool,
 ) -> Result<(), String> {
-    let dir = app.parent().ok_or("The app has no folder.")?;
+    let dir = app
+        .parent()
+        .ok_or_else(|| crate::i18n::tr("The app has no folder.").to_string())?;
     let name = app.file_name().unwrap_or_default().to_string_lossy();
     // A single process may update more than once, with older generations still in use.
     let mut random = [0u8; 16];
@@ -115,36 +117,51 @@ fn replace_bundle_with(
     let staged = dir.join(format!(".{name}.update-{suffix}"));
     let rollback = dir.join(format!(".{name}.rollback-{suffix}"));
     let old = dir.join(format!(".{name}.old-{suffix}"));
-    fs::create_dir(&staged).map_err(|e| format!("Could not stage the new app: {e}"))?;
+    fs::create_dir(&staged).map_err(|e| {
+        crate::i18n::trf(
+            "Could not stage the new app: {error}",
+            &[("error", &e.to_string())],
+        )
+    })?;
     let copied = Command::new("/usr/bin/ditto")
         .arg(new)
         .arg(&staged)
         .status();
     if !copied.is_ok_and(|s| s.success()) {
         let _ = fs::remove_dir_all(&staged);
-        return Err(format!(
-            "Could not copy the new app next to {}.",
-            app.display()
+        return Err(crate::i18n::trf(
+            "Could not copy the new app next to {path}.",
+            &[("path", &app.display().to_string())],
         ));
     }
     if !signature(&staged) {
         let _ = fs::remove_dir_all(&staged);
-        return Err(
-            "The downloaded app's signature doesn't hold; the launcher stays as it is.".into(),
-        );
+        return Err(crate::i18n::tr(
+            "The downloaded app's signature doesn't hold; the launcher stays as it is.",
+        )
+        .into());
     }
     // Startup cleanup in another process must not collect an idle backup while this
     // transaction can still need it. Publish it as retired only after the final check.
     fs::rename(app, &rollback).map_err(|e| {
         let _ = fs::remove_dir_all(&staged);
-        format!("Could not move {} aside: {e}", app.display())
+        crate::i18n::trf(
+            "Could not move {path} aside: {error}",
+            &[
+                ("path", &app.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        )
     })?;
     if let Err(e) = fs::rename(&staged, app) {
         let _ = fs::rename(&rollback, app);
         let _ = fs::remove_dir_all(&staged);
-        return Err(format!(
-            "Could not put the new app at {}: {e}",
-            app.display()
+        return Err(crate::i18n::trf(
+            "Could not put the new app at {path}: {error}",
+            &[
+                ("path", &app.display().to_string()),
+                ("error", &e.to_string()),
+            ],
         ));
     }
     if !signature(app) {
@@ -152,9 +169,9 @@ fn replace_bundle_with(
         if fs::rename(app, &failed).is_ok() && fs::rename(&rollback, app).is_ok() {
             let _ = fs::remove_dir_all(&failed);
         }
-        return Err(format!(
-            "The new app's signature doesn't hold at {}; the launcher stays as it was.",
-            app.display()
+        return Err(crate::i18n::trf(
+            "The new app's signature doesn't hold at {path}; the launcher stays as it was.",
+            &[("path", &app.display().to_string())],
         ));
     }
     // Failure to publish the now-retired bundle only leaves a conservative quarantine;

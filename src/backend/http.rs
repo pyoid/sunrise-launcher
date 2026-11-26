@@ -55,7 +55,8 @@ pub(crate) fn get_unless_missing(url: &str) -> Result<Option<ureq::Response>, St
                 if url.starts_with("https://api.github.com/")
                     && crate::github::rate_limited(code, |h| r.header(h).map(str::to_owned)) =>
             {
-                "GitHub's rate limit was reached. Try again in a few minutes.".into()
+                crate::i18n::tr("GitHub's rate limit was reached. Try again in a few minutes.")
+                    .into()
             }
             ureq::Error::Status(code, _) => format!("{url} answered {code}"),
             ureq::Error::Transport(t) => format!("No connection: {t}"),
@@ -96,7 +97,10 @@ pub(crate) fn fetch_small_cancellable(
         if let Some(stop) = stop {
             stop.check()?;
         }
-        return Err(format!("Download interrupted: {e}"));
+        return Err(crate::i18n::trf(
+            "Download interrupted: {error}",
+            &[("error", &e.to_string())],
+        ));
     }
     Ok(Some(body))
 }
