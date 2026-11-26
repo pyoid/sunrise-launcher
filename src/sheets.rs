@@ -1282,7 +1282,14 @@ impl Launcher {
                 }),
             );
         }
-        list = list.child(
+        list = list
+            .child(
+                div()
+                    .text_size(px(tokens::SMALL))
+                    .text_color(rgb(palette().muted))
+                    .child(tr("Dev is the newest build, published as changes land, often several times a day. Native mods are rebuilt for each new build, and some may not work until their authors update them.")),
+            )
+            .child(
             option(
                 "alt-build-keep",
                 pinned.is_some(),
@@ -1296,7 +1303,7 @@ impl Launcher {
                 this.open_versions();
                 cx.notify();
             })),
-        );
+            );
         // Only the choices scroll when the window is short: the heading and an error stay in
         // view (#184).
         let choices = div()
