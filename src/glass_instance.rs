@@ -98,7 +98,7 @@ fn home_update_with<'a>(
     // Compare only a settled base, never a legacy pin, derived executable, or cache guess.
     let active = read_active(&profile.home).ok()??;
     let base = active.base();
-    let channel = profile.channel;
+    let channel = profile.channel.following(releases);
     if Channel::of_build(base) != Some(channel) {
         return None;
     }
@@ -274,9 +274,27 @@ mod tests {
             home_update(&profile, releases, |_| Ok(Some(active(base, base))))
                 .map(|release| release.tag.clone())
         };
-        assert_eq!(offer(&releases[..2], fallback), None);
         assert_eq!(offer(&releases, fallback), None);
         assert_eq!(offer(&releases, "imported-2026-11-18"), None);
+    }
+
+    #[test]
+    fn a_stable_profile_playing_nightly_is_offered_the_newer_nightly() {
+        let base = "nightly-2026-11-18-aaaaaaa";
+        let newer = "nightly-2026-11-20-bbbbbbb";
+        let profile = home_profile("waiting", Channel::Stable, None);
+        let releases = [
+            release(newer, true, true),
+            release("26.3-0.1.1", false, false),
+        ];
+        let offer = |releases: &[Release]| {
+            home_update(&profile, releases, |_| Ok(Some(active(base, base))))
+                .map(|release| release.tag.clone())
+        };
+        assert_eq!(offer(&releases).as_deref(), Some(newer));
+        // Once a Stable build exists the profile follows it, and the Nightly is not offered.
+        let with_stable = [releases[0].clone(), release("26.3-0.1.0", false, true)];
+        assert_eq!(offer(&with_stable), None);
     }
 
     #[test]

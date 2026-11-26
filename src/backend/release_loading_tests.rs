@@ -583,3 +583,24 @@ fn nightly_bookkeeping_uses_final_catalogue_when_newest_nightly_is_sdk_only() {
         .map(|rel| rel.tag.as_str());
     assert_eq!(final_top, Some("nightly-2026-11-20-abc1234"));
 }
+
+#[test]
+fn a_stable_profile_waiting_on_nightly_is_checked_against_nightly() {
+    let Some(static_asset) = ASSET else {
+        return;
+    };
+    let list = vec![serde_json::json!({
+        "tag_name": "nightly",
+        "name": "Nightly 2026-11-20 · abc1234",
+        "prerelease": true,
+        "assets": [{"name": static_asset, "size": 1}]
+    })];
+    let updates = releases_and_updates_with(
+        || Ok(list),
+        || vec!["nightly-2026-11-19-bbbbbbb".into()],
+        Some(Stable),
+        || Ok(None),
+        |_| {},
+    );
+    assert_eq!(updates.sunrise.unwrap().tag, "nightly-2026-11-20-abc1234");
+}

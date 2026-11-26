@@ -1282,6 +1282,16 @@ impl Launcher {
                 }),
             );
         }
+        // What Dev is, under its row, while there is a Dev build to choose.
+        let dev = tr("Dev is the newest build, published as changes land, often several times a day. Native mods are rebuilt for each new build, and some may not work until their authors update them.");
+        list = list.when(!self.profile_build_choices(Channel::Dev).is_empty(), |d| {
+            d.child(
+                div()
+                    .text_size(px(tokens::SMALL))
+                    .text_color(rgb(palette().muted))
+                    .child(dev),
+            )
+        });
         list = list.child(
             option(
                 "alt-build-keep",
