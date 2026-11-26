@@ -214,21 +214,23 @@ impl Set {
             digests: &digests,
             left_out: &left_out,
         };
-        let (version, exists) = installable(&version, &contents).unwrap();
-        if !exists {
+        let image = Image::new(&mods, &pins, &ordered, &dispatch, &left_out, &read);
+        let (version, evidence) = installable(&version, &contents, &image).unwrap();
+        if evidence.is_none() {
             self.publish(&version, &mixins, &left_out, &mods, &ordered, &digests);
         }
-        super::record(&Planned {
-            version: &version,
-            image: Image::new(&mods, &pins, &ordered, &dispatch, &left_out, &read),
-            admission: Admission::with_sdk_base(
+        super::record(
+            &version,
+            &contents,
+            &image,
+            Admission::with_sdk_base(
                 &self.base,
                 &self.origin,
                 options.exact_home.is_some(),
                 self.sdk_base.as_deref().map(std::ffi::OsStr::new),
             ),
-            contents: &contents,
-        });
+            evidence,
+        );
         version
     }
 
@@ -816,11 +818,73 @@ fn the_default_build_uses_an_installed_set_without_the_sdk_check() {
     assert_eq!(checks, 2, "the profile's check and the build's");
 }
 
-/// Through the default build entry on a developer base, which plans without any SDK check, so
-/// the planned path reaches the installed build: an older launcher's reduced build under the
-/// whole set's version is neither said to be up to date nor played, and a game changed after
-/// it was sealed is neither sealed again nor found on the next build. Both plans build under
-/// the next version instead, which this fixture can't compile.
+/// An override changes the image without changing the version. Even after the fast path
+/// misses, the default build must use the next slot rather than re-admit the old image.
+#[test]
+fn the_default_build_uses_the_slot_with_the_planned_image() {
+    if !in_child(
+        "native_mods::reuse::tests::the_default_build_uses_the_slot_with_the_planned_image",
+        "SUNRISE_REUSE_PLANNED_IMAGE_CHILD",
+    ) {
+        return;
+    }
+    const DEVELOPER: &str = "developer-reuse";
+    let developer = format!(r#"{{"revision":"{PINNED}"}}"#);
+    let instance = install_base(DEVELOPER, &[("developer.json", developer)]);
+    keep_index(PINNED, "2026-11-13");
+    let set =
+        Set::developer("reuse-planned-image", DEVELOPER).on(platform_for_game(DEVELOPER).unwrap());
+    let manifest = set.folder.join("beta").join(NATIVE_MANIFEST);
+    let text = fs::read_to_string(&manifest).unwrap();
+    fs::write(
+        &manifest,
+        text.replace("[native]", "load_before=['alpha']\n[native]"),
+    )
+    .unwrap();
+    let version = set.install(&BuildOptions::default());
+    assert_eq!(set.found().as_deref(), Some(version.as_str()));
+    let evidence = fs::read(set.evidence(&version)).unwrap();
+    fs::write(set.overrides(), "[beta]\nalpha='drop'\n").unwrap();
+    assert!(set.found().is_none(), "the dispatch order changed");
+
+    // Seed the new image in the next slot. Keep the original seal valid for the real build.
+    let game = backend::version_dir(&version).join(backend::CLIENT);
+    fs::remove_file(&game).unwrap();
+    let next = set.install(&BuildOptions::default());
+    assert_eq!(versions(&version).nth(1).as_deref(), Some(next.as_str()));
+    fs::write(&game, game_executable()).unwrap();
+    // The next slot matches, but this caller still has to plan before it can use it.
+    set.edit_evidence(&next, |json| {
+        json["admitted"][0]["launcher"] = "0.0.1".into()
+    });
+    assert!(set.found().is_none(), "the next slot needs admission");
+
+    let (built, _, steps) = build_default(&set, &instance);
+    assert!(
+        matches!(&built, Ok(ClientBuild::Native(found)) if *found == next),
+        "{built:?}"
+    );
+    assert_eq!(steps, [Step::Plan(Plan::UpToDate, Profile::Optimized)]);
+    assert_eq!(
+        instances::find("sunrise").unwrap().version.as_deref(),
+        Some(next.as_str())
+    );
+    assert_eq!(
+        fs::read(set.evidence(&version)).unwrap(),
+        evidence,
+        "the original image's evidence is unchanged"
+    );
+    assert_eq!(
+        set.found().as_deref(),
+        Some(next.as_str()),
+        "planning admitted the matching image"
+    );
+}
+
+/// Through the default build entry on a developer base, which plans without any SDK check,
+/// neither a reduced legacy build nor one with an unusable executable is said to be up to date
+/// or played, and a game changed after it was sealed is never sealed again. These plans try the
+/// next version instead, which this fixture can't compile.
 #[test]
 fn the_default_build_never_takes_a_reduced_or_changed_build() {
     if !in_child(
@@ -863,6 +927,33 @@ fn the_default_build_never_takes_a_reduced_or_changed_build() {
         !set.evidence(&whole).exists(),
         "the reduced build isn't sealed"
     );
+
+    // A legacy build with all its mods and records, but no readable executable to seal.
+    let set = Set::developer("reuse-legacy-no-game", DEVELOPER).on(platform);
+    let version = set.install(&BuildOptions::default());
+    fs::remove_file(set.evidence(&version)).unwrap();
+    let game = backend::version_dir(&version).join(backend::CLIENT);
+    fs::remove_file(&game).unwrap();
+    for (case, is_dir) in [
+        ("missing executable", false),
+        ("directory at executable path", true),
+    ] {
+        if is_dir {
+            fs::create_dir(&game).unwrap();
+        }
+        let (built, _, steps) = build_default(&set, &instance);
+        assert!(
+            built.is_err(),
+            "{case}: the next version is built: {built:?}"
+        );
+        assert!(!up_to_date(&steps), "{case}: {steps:?}");
+        assert_eq!(
+            instances::find("sunrise").unwrap().version,
+            None,
+            "{case}: not pinned"
+        );
+        assert!(!set.evidence(&version).exists(), "{case}: not sealed");
+    }
 
     // A build that was sealed, then its game changed.
     let set = Set::developer("reuse-changed-game", DEVELOPER).on(platform);

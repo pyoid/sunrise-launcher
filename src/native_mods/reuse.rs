@@ -28,8 +28,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 /// Beside an installed client build: what the fast path proves it with ([`Evidence`]).
 pub(super) const EVIDENCE: &str = ".native-reuse.json";
 
-/// The evidence's layout. Another layout is no evidence: the build is planned, and the plan
-/// writes it again.
+/// The evidence's layout. An unknown layout is unreadable, not missing.
 const SCHEMA: u32 = 1;
 
 /// How many admissions one build keeps (each caller and base that planned it has one).
@@ -140,7 +139,7 @@ fn sdk_base_fingerprint(setting: &std::ffi::OsStr) -> String {
 /// The file beside a build ([`EVIDENCE`]).
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Evidence {
+pub(super) struct Evidence {
     schema: u32,
     version: String,
     image: Image,
@@ -151,10 +150,46 @@ struct Evidence {
 }
 
 impl Evidence {
-    /// `dir`'s evidence; None when there is none, or it is torn or in another layout.
-    fn read(dir: &Path) -> Option<Self> {
-        let evidence: Self = serde_json::from_slice(&fs::read(dir.join(EVIDENCE)).ok()?).ok()?;
-        (evidence.schema == SCHEMA).then_some(evidence)
+    /// Missing evidence allows first adoption; unreadable evidence does not.
+    fn read(dir: &Path) -> Result<Option<Self>, ()> {
+        let bytes = match fs::read(dir.join(EVIDENCE)) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(()),
+        };
+        let evidence: Self = serde_json::from_slice(&bytes).map_err(|_| ())?;
+        if evidence.schema != SCHEMA {
+            return Err(());
+        }
+        Ok(Some(evidence))
+    }
+
+    /// Prove the installed mods and game are this plan's. Only a build with no evidence may
+    /// take a new seal, and only if its artifact can be captured.
+    fn prove(version: &str, contents: &Contents<'_>, image: &Image) -> Option<Self> {
+        if !contents.installed_in(version) {
+            return None;
+        }
+        let dir = Target::Client.directory(version);
+        let old = Self::read(&dir).ok()?;
+        if old
+            .as_ref()
+            .is_some_and(|old| old.version != version || old.image != *image)
+        {
+            return None;
+        }
+        let seal = Artifact::capture_at(version, &dir).ok()?;
+        match old {
+            Some(old) if old.seal == seal => Some(old),
+            Some(_) => None,
+            None => Some(Self {
+                schema: SCHEMA,
+                version: version.to_owned(),
+                image: image.clone(),
+                seal,
+                admitted: Vec::new(),
+            }),
+        }
     }
 }
 
@@ -244,10 +279,8 @@ const VERSIONS_TRIED: usize = 8;
 
 /// The versions a client plan installs as, in order: its own (`version_for`), then one after
 /// another while a build under the one before is installed but doesn't hold the plan
-/// ([`holds`]): a build an older launcher made without some of the mods under the whole set's
-/// version, or one whose game changed after it was sealed. Such a build is never used for the
-/// plan, nor sealed again, nor replaced while something may still run it: the plan installs
-/// under the next version, the same one every time for the same plan.
+/// ([`Evidence::prove`]). Such a build is never used for the plan, sealed again, or replaced
+/// while something may still run it: the plan tries the next version in the same sequence.
 pub(super) fn versions(version: &str) -> impl Iterator<Item = String> + '_ {
     (0..VERSIONS_TRIED).map(move |n| {
         if n == 0 {
@@ -268,38 +301,28 @@ pub(super) fn versions(version: &str) -> impl Iterator<Item = String> + '_ {
     })
 }
 
-/// Whether installed client build `version` holds the plan `contents` ([`Contents`]) and is still
-/// the game its evidence sealed. A build with no evidence yet (one an older launcher made) has
-/// no seal to break: it is sealed when it is first used. Evidence that can't be read is no
-/// such build: it is never sealed again.
-pub(super) fn holds(version: &str, contents: &Contents<'_>) -> bool {
-    let dir = Target::Client.directory(version);
-    contents.installed_in(version)
-        && match sealed(&dir) {
-            Sealed::None => true,
-            Sealed::Unreadable => false,
-            Sealed::As(evidence) => {
-                evidence.version == version
-                    && Artifact::capture_at(version, &dir).is_ok_and(|seal| seal == evidence.seal)
-            }
+/// The first free slot or installed build that holds this plan, in version order.
+fn slot(
+    version: &str,
+    contents: &Contents<'_>,
+    image: &Image,
+) -> Option<(String, Option<Evidence>)> {
+    versions(version).find_map(|candidate| {
+        if !installed(&candidate) {
+            return Some((candidate, None));
         }
+        let evidence = Evidence::prove(&candidate, contents, image)?;
+        Some((candidate, Some(evidence)))
+    })
 }
 
-/// The version client plan `version` installs as ([`versions`]), and whether a build there
-/// already holds it ([`holds`]).
+/// The version the client plan installs as ([`versions`]), with proof if it can be used again.
 pub(super) fn installable(
     version: &str,
     contents: &Contents<'_>,
-) -> Result<(String, bool), Failed> {
-    for candidate in versions(version) {
-        if !installed(&candidate) {
-            return Ok((candidate, false));
-        }
-        if holds(&candidate, contents) {
-            return Ok((candidate, true));
-        }
-    }
-    Err(Failed::Other(trf(
+    image: &Image,
+) -> Result<(String, Option<Evidence>), Failed> {
+    slot(version, contents, image).ok_or_else(|| Failed::Other(trf(
         "Every installed build named for these mods ({version}) holds other mods or was changed after it was installed. Remove them, then build again.",
         &[("version", version)],
     )))
@@ -312,68 +335,26 @@ fn installed(version: &str) -> bool {
         .is_file()
 }
 
-/// A build's evidence, as [`holds`] and [`record`] read it.
-enum Sealed {
-    None,
-    Unreadable,
-    As(Box<Evidence>),
-}
-
-fn sealed(dir: &Path) -> Sealed {
-    match fs::read(dir.join(EVIDENCE)) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Sealed::None,
-        Err(_) => Sealed::Unreadable,
-        Ok(bytes) => serde_json::from_slice::<Evidence>(&bytes)
-            .ok()
-            .filter(|evidence| evidence.schema == SCHEMA)
-            .map_or(Sealed::Unreadable, |evidence| {
-                Sealed::As(Box::new(evidence))
-            }),
-    }
-}
-
-/// A planned client build, once it is installed or used again.
-pub(super) struct Planned<'a> {
-    pub(super) version: &'a str,
-    pub(super) image: Image,
-    pub(super) admission: Admission,
-    pub(super) contents: &'a Contents<'a>,
-}
-
-/// Keeps `planned`'s evidence beside its build, when the installed build is the one planned
-/// ([`Contents`]); else nothing is kept, so the build isn't found without planning. A build is
-/// sealed once: when it is published, or first used when an older launcher made it. Evidence
-/// whose seal the game no longer matches, or that can't be read, is left as it is: the changed
-/// game is never sealed. A failure costs only the next build's planning.
-pub(super) fn record(planned: &Planned<'_>) {
-    let dir = Target::Client.directory(planned.version);
-    if !planned.contents.installed_in(planned.version) {
-        return;
-    }
-    let Ok(seal) = Artifact::capture_at(planned.version, &dir) else {
+/// Keep the admission on the same image and seal proved by [`installable`]. A newly published
+/// build has no proof yet, so verify its installation first. A failure costs only the next
+/// build's planning.
+pub(super) fn record(
+    version: &str,
+    contents: &Contents<'_>,
+    image: &Image,
+    admission: Admission,
+    evidence: Option<Evidence>,
+) {
+    let Some(mut evidence) = evidence.or_else(|| Evidence::prove(version, contents, image)) else {
         return;
     };
-    let old = match sealed(&dir) {
-        Sealed::None => None,
-        Sealed::As(old) if old.version == planned.version && old.seal == seal => Some(old),
-        Sealed::As(_) | Sealed::Unreadable => return,
-    };
-    let mut admitted = old
-        .filter(|old| old.image == planned.image)
-        .map(|old| old.admitted)
-        .unwrap_or_default();
-    admitted.retain(|admission| *admission != planned.admission);
-    admitted.push(planned.admission.clone());
+    let admitted = &mut evidence.admitted;
+    admitted.retain(|old| *old != admission);
+    admitted.push(admission);
     let drop = admitted.len().saturating_sub(ADMISSIONS_KEPT);
     admitted.drain(..drop);
-    let evidence = Evidence {
-        schema: SCHEMA,
-        version: planned.version.to_owned(),
-        image: planned.image.clone(),
-        seal,
-        admitted,
-    };
     if let Ok(bytes) = serde_json::to_vec(&evidence) {
+        let dir = Target::Client.directory(&evidence.version);
         let _ = sdk_cache::write_whole(&dir.join(EVIDENCE), &bytes);
     }
 }
@@ -518,15 +499,11 @@ pub(super) fn lookup(request: &Request<'_>, requested: &[Bundle]) -> Option<Hit>
         digests: &digests,
         left_out: &derived.left_out,
     };
-    // The version `installable` would take, when a build there holds the plan: then proved.
-    let version = versions(&derived.version)
-        .take_while(|version| installed(version))
-        .find(|version| holds(version, &contents))?;
-    let proved = Evidence::read(&request.target.directory(&version)).is_some_and(|evidence| {
-        evidence.version == version
-            && evidence.image == derived.image
-            && evidence.admitted.contains(&derived.admission)
-    });
+    // Check admission on the same evidence that proved the image and seal.
+    let (version, evidence) = slot(&derived.version, &contents, &derived.image)?;
+    if !evidence?.admitted.contains(&derived.admission) {
+        return None;
+    }
     // Read again: a profile, override or kept index that changed meanwhile, or a mod changed in
     // the folder since it was copied, is another build.
     let unchanged = || {
@@ -540,7 +517,7 @@ pub(super) fn lookup(request: &Request<'_>, requested: &[Bundle]) -> Option<Hit>
                     })
             })
     };
-    (proved && unchanged()).then(|| Hit {
+    unchanged().then(|| Hit {
         version,
         ordered: derived.ordered,
     })
