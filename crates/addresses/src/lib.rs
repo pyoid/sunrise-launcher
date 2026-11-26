@@ -4,6 +4,11 @@
 /// (`SUNRISE_MOD_INDEX_V2` overrides it).
 pub const MOD_INDEX_V2: &str = "https://sunrise-org.github.io/sunrise-mods/v2/index.signed";
 
+/// The registry's copy of the game repository's GitHub API reads, used when GitHub rate-limits a
+/// network: `/repos/sunrise-org/sunrise/releases` is at `<this>/repos/sunrise-org/sunrise/releases`
+/// (`SUNRISE_GITHUB_MIRROR` overrides it).
+pub const GITHUB_MIRROR: &str = "https://sunrise-org.github.io/sunrise-mods/github";
+
 /// The registry's Nightly source listings. A listing does not vet the source or authorize code.
 pub const MOD_SOURCES: &str = "https://sunrise-org.github.io/sunrise-mods/sources.json";
 

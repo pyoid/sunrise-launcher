@@ -368,21 +368,11 @@ fn other_repositories_have_no_mirror() {
 }
 
 #[test]
-fn no_mirror_is_built_in() {
-    let cache = scratch("built-in");
-    let err = json_with_policy(
-        RELEASES,
-        &cache,
-        T0,
-        MIRROR,
-        CachePolicy::PreferCache,
-        |_, _| Answer::RateLimited,
-        no_mirror,
-    )
-    .unwrap_err();
-    assert!(err.contains("rate limit"), "{err}");
-    assert!(!err.contains("mirror"), "{err}");
-    let _ = fs::remove_dir_all(cache);
+fn the_built_in_mirror_is_the_registrys_copy() {
+    assert_eq!(
+        mirror_url_with(RELEASES, MIRROR).as_deref(),
+        Some("https://sunrise-org.github.io/sunrise-mods/github/repos/sunrise-org/sunrise/releases?per_page=100")
+    );
 }
 
 #[test]
@@ -722,9 +712,11 @@ fn release_pagination_refuses_a_feed_past_the_cap() {
 }
 
 #[test]
-fn a_json_only_mirror_does_not_hide_the_next_page_after_a_full_one() {
+fn the_mirror_copy_is_the_whole_release_list_even_when_full() {
     let cache = tempfile::tempdir().unwrap();
+    let pages = std::cell::Cell::new(0);
     let read = release_list_with(backend::GAME_REPO, CachePolicy::PreferCache, |request| {
+        pages.set(pages.get() + 1);
         page_with(
             request,
             cache.path(),
@@ -732,16 +724,12 @@ fn a_json_only_mirror_does_not_hide_the_next_page_after_a_full_one() {
             "https://mirror.example",
             |_, _| Answer::RateLimited,
             |url| {
-                let body = if url.ends_with("per_page=100") {
-                    serde_json::json!(vec![serde_json::Value::Null; RELEASES_PER_PAGE])
-                } else {
-                    assert!(url.ends_with("per_page=100&page=2"), "{url}");
-                    list("26.3-0.1.0")
-                };
+                let body = serde_json::json!(vec![serde_json::Value::Null; RELEASES_PER_PAGE]);
                 answer(url, format!("HTTP/1.1 200 OK\r\n\r\n{body}").parse(), false)
             },
         )
     })
     .unwrap();
-    assert_eq!(read[RELEASES_PER_PAGE]["tag_name"], "26.3-0.1.0");
+    assert_eq!(pages.get(), 1);
+    assert_eq!(read.len(), RELEASES_PER_PAGE);
 }
