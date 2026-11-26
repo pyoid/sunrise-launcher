@@ -2767,9 +2767,7 @@ fn download_for_owner(
         account::store(),
         &mut accounts,
     );
-    if let Err(e) = accounts.save_renewed() {
-        log(format!("Sunrise: the accounts are not saved: {e}"));
-    }
+    accounts.save_renewed()?;
     download_for(
         pins,
         dir,

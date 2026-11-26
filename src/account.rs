@@ -43,6 +43,11 @@ const SIGN_IN_AGAIN: &str = "Your Microsoft sign-in expired. Sign in again.";
 /// The Minecraft token is renewed when it has less than this left.
 const RENEW_BEFORE: u64 = 3600;
 
+/// How long a launch waits to save its renewed accounts behind another account operation. A
+/// holder can sit in the network for its connect timeout (15 s) plus its read timeout (60 s),
+/// so the bound is above one holder's worst case.
+const ACCOUNT_OPERATION_WAIT: Duration = Duration::from_secs(120);
+
 /// The configured Azure app, if any: the run-time variable wins over the build-time one, and an
 /// empty value means none.
 pub fn client_id() -> Option<String> {
@@ -1894,14 +1899,37 @@ impl Accounts {
     /// accounts' lock: an account signed in or out while the services were asked stays so, where
     /// saving this copy, loaded before, would undo it.
     pub fn save_renewed(&self) -> Result<(), String> {
-        self.save_renewed_to(store(), &Self::path())
+        self.save_renewed_to(store(), &Self::path(), ACCOUNT_OPERATION_WAIT)
     }
+    /// [`Self::save_renewed`], giving up after `within` behind another account operation.
     pub(crate) fn save_renewed_to(
         &self,
         store: &dyn SecretStore,
         path: &Path,
+        within: Duration,
     ) -> Result<(), String> {
-        let _operation = session::lock(store)?;
+        let _operation = match session::lock_within(store, Some(Duration::ZERO)) {
+            Ok(operation) => operation,
+            Err(_) => {
+                crate::launcher_log::line("Waiting for another account operation…");
+                let waited = std::time::Instant::now();
+                let operation = session::lock_within(store, Some(within)).map_err(|reason| {
+                    crate::launcher_log::line(format!(
+                        "Gave up waiting for another account operation after {} ms: {reason}",
+                        waited.elapsed().as_millis()
+                    ));
+                    crate::i18n::trf(
+                        "Another account operation is still running. Wait for it to finish, then try again. ({reason})",
+                        &[("reason", &reason)],
+                    )
+                })?;
+                crate::launcher_log::line(format!(
+                    "Waited {} ms for another account operation",
+                    waited.elapsed().as_millis()
+                ));
+                operation
+            }
+        };
         let mut saved = Self::load_from(path);
         for account in &self.accounts {
             saved.update(account.clone());

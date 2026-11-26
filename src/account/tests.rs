@@ -2627,6 +2627,21 @@ fn a_status_read_gives_up_behind_a_long_operation() {
 }
 
 #[test]
+fn saving_renewed_accounts_fails_with_a_message_when_another_operation_holds_the_lock() {
+    let store = MemoryStore::default();
+    let dir = tempfile::tempdir().unwrap();
+    let _held = session::lock(&store).unwrap();
+    let error = Accounts::default()
+        .save_renewed_to(
+            &store,
+            &dir.path().join("accounts.json"),
+            std::time::Duration::from_millis(150),
+        )
+        .unwrap_err();
+    assert!(error.starts_with("Another account operation is still running."));
+}
+
+#[test]
 fn a_launch_as_another_account_leaves_the_selected_one() {
     let store = MemoryStore::default();
     // Notch is signed in, owns the game and is selected; Alex is listed but no longer has
@@ -2752,7 +2767,9 @@ fn a_launch_saving_late_keeps_sign_ins_and_outs_made_meanwhile() {
     now.accounts.retain(|a| a.uuid != "gone");
     now.accounts.push(other("new", "Arriving"));
     now.save_to(&file).unwrap();
-    renewed.save_renewed_to(&store, &file).unwrap();
+    renewed
+        .save_renewed_to(&store, &file, std::time::Duration::from_secs(5))
+        .unwrap();
     let saved = Accounts::load_from(&file);
     let uuids: Vec<&str> = saved.accounts.iter().map(|a| a.uuid.as_str()).collect();
     assert_eq!(uuids, [UUID, "new"]);

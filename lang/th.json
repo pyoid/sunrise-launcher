@@ -1957,5 +1957,6 @@
   "SDK tool first message after {ms} ms (start, layout and staging)": "SDK tool first message after {ms} ms (start, layout and staging)",
   "Old build files from an earlier launcher are kept until the launcher can prove no build still uses them. They are removed on the next cleanup once it can.": "Old build files from an earlier launcher are kept until the launcher can prove no build still uses them. They are removed on the next cleanup once it can.",
   "Dev is the newest build, published as changes land, often several times a day. Native mods are rebuilt for each new build, and some may not work until their authors update them.": "Dev is the newest build, published as changes land, often several times a day. Native mods are rebuilt for each new build, and some may not work until their authors update them.",
-  "The launcher hit an internal error: {message}": "The launcher hit an internal error: {message}"
+  "The launcher hit an internal error: {message}": "The launcher hit an internal error: {message}",
+  "Another account operation is still running. Wait for it to finish, then try again. ({reason})": "Another account operation is still running. Wait for it to finish, then try again. ({reason})"
 }
