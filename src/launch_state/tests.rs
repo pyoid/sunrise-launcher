@@ -764,3 +764,30 @@ fn registry_install_shows_build_percent_and_offers_stop_until_publishing() {
         Some(("Finishing…".into(), StripAct::Home))
     );
 }
+
+#[test]
+fn preparing_says_its_step_and_the_download_count_beside_play() {
+    use sunrise_launcher::backend::PrepareStep;
+    use sunrise_launcher::browser::sunrise::InstallProgress::Minecraft;
+    let said = |step, files| {
+        Facts {
+            preparing: true,
+            prepare: Some(Minecraft(step, files)),
+            ..idle()
+        }
+        .view()
+        .said
+    };
+    assert_eq!(
+        said(PrepareStep::Files, None).as_deref(),
+        Some("Finding Minecraft's files…")
+    );
+    assert_eq!(
+        said(PrepareStep::Files, Some((120, 4000))).as_deref(),
+        Some("Downloading Minecraft's files (120 of 4000)")
+    );
+    assert_eq!(
+        said(PrepareStep::Java, None).as_deref(),
+        Some("Finding Java…")
+    );
+}

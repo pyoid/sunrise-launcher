@@ -15,6 +15,8 @@ pub(crate) struct Facts {
     /// A game build downloading, and how far it is (0 to 1).
     pub installing: Option<f32>,
     pub preparing: bool,
+    /// The step the preparation is at, and the download's count while one runs.
+    pub prepare: Option<InstallProgress>,
     /// Native mods are being built.
     pub building: bool,
     pub starting: bool,
@@ -278,6 +280,11 @@ impl Facts {
             .map(|_| tr("A mod install couldn't be finished.").into())
             .or(brief)
             .filter(|_| !self.building)
+            .or_else(|| {
+                self.prepare
+                    .filter(|_| main == Main::Preparing)
+                    .map(crate::mods_page::install::stage_label)
+            })
             .or_else(|| hold.clone())
             .or_else(|| update.map(|build| trf("{build} is available", &[("build", build)])));
         let way_out = match failed_at {
@@ -455,6 +462,12 @@ impl Launcher {
         Facts {
             installing: self.installing.as_ref().map(|(_, progress)| *progress),
             preparing: self.preparing,
+            prepare: self.preparing.then(|| {
+                InstallProgress::Minecraft(
+                    backend::prepare_step(),
+                    sunrise_launcher::mojang::progress(),
+                )
+            }),
             building: self.native_step.is_some(),
             starting: self.starting_client.is_some() || self.play_admission.is_some(),
             step: self.play_step,
