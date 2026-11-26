@@ -1394,20 +1394,20 @@ fn artwork_reader_does_not_wait_for_a_pipe_writer() {
 }
 
 #[test]
-fn first_profile_is_stable_without_migrating_old_players() {
+fn first_profile_is_dev_without_migrating_old_players() {
     let tmp = tempfile::tempdir().unwrap();
     let fresh = tmp.path().join("fresh");
     let home = tmp.path().join("game");
     initialize_default_in(&home, &fresh).unwrap();
-    assert_eq!(list_in(&home, &fresh)[0].channel, Channel::Stable);
+    assert_eq!(list_in(&home, &fresh)[0].channel, Channel::Dev);
     fs::write(fresh.join("settings.json"), "{}").unwrap();
     initialize_default_in(&home, &fresh).unwrap();
-    assert_eq!(list_in(&home, &fresh)[0].channel, Channel::Stable);
+    assert_eq!(list_in(&home, &fresh)[0].channel, Channel::Dev);
     assert_eq!(
         create_whole_in(&home, &fresh, "Another profile", None, None, |_| {})
             .unwrap()
             .channel,
-        Channel::Stable
+        Channel::Dev
     );
 
     let existing = tmp.path().join("existing");

@@ -536,7 +536,7 @@ fn initialize_default_in(game_home: &Path, data: &Path) -> Result<(), String> {
             instances: BTreeMap::from([(
                 DEFAULT.to_owned(),
                 Meta {
-                    channel: Some(Channel::Stable),
+                    channel: Some(Channel::Dev),
                     ..Meta::default()
                 },
             )]),
@@ -1340,7 +1340,7 @@ fn create_with_publish(
         name: (name != slug).then(|| name.to_string()),
         icon: from.and_then(|f| f.icon.clone()),
         group: from.and_then(|f| f.group.clone()),
-        channel: Some(Channel::Stable),
+        channel: Some(Channel::Dev),
         ..Meta::default()
     };
     choose(&mut choices);
