@@ -22,7 +22,7 @@ pub enum Phase {
 
 impl Phase {
     pub fn label(self) -> &'static str {
-        match self {
+        crate::i18n::tr_key(match self {
             Self::Queued => "Waiting for account access…",
             Self::Keychain => "Reading keychain…",
             Self::Microsoft => "Renewing Microsoft sign-in…",
@@ -32,7 +32,7 @@ impl Phase {
             Self::Profile => "Loading Minecraft profile…",
             Self::Saving => "Saving sign-in…",
             Self::SigningOut => "Signing out…",
-        }
+        })
     }
 }
 
@@ -54,17 +54,18 @@ pub struct Status {
     pub message: String,
 }
 
-pub(super) const DAMAGED_SIGN_IN: &str = "Could not read the saved sign-in. Sign in again.";
+pub(super) const DAMAGED_SIGN_IN: &str =
+    crate::i18n::tr_key("Could not read the saved sign-in. Sign in again.");
 
 impl Status {
     pub fn label(&self) -> &'static str {
-        match self.state {
+        crate::i18n::tr_key(match self.state {
             State::Ready => "Ready for online play",
             State::NeedsRefresh => "Needs refresh",
             State::SignInRequired => "Sign in again",
             State::Retry => "Could not check sign-in",
             State::OwnershipRequired => "Minecraft account needs attention",
-        }
+        })
     }
 
     fn failed(error: &SignInError) -> Self {

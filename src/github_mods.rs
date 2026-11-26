@@ -28,7 +28,7 @@ pub(crate) use source::{forward, pack_pasted, pack_pin, pack_pins};
 pub use source::{SourceOrigin, SourceTrack};
 
 /// What a player is told before a mod from GitHub is installed.
-pub const WARNING: &str = "Not reviewed by the Sunrise registry. Native mods run with full access to this computer. Read the source first.";
+pub const WARNING: &str = crate::i18n::tr_key("Not reviewed by the Sunrise registry. Native mods run with full access to this computer. Read the source first.");
 
 /// The most a release asset or a mod's archive may be.
 const MAX_ASSET: u64 = 64 << 20;
@@ -201,8 +201,9 @@ pub fn api(path: &str) -> Result<Option<serde_json::Value>, String> {
     }
 }
 
-const RATE_LIMIT: &str =
-    "GitHub's rate limit for anonymous requests was reached. Try again in a few minutes.";
+const RATE_LIMIT: &str = crate::i18n::tr_key(
+    "GitHub's rate limit for anonymous requests was reached. Try again in a few minutes.",
+);
 
 /// Percent-encodes a ref for a URL path, keeping its `/`.
 fn encode(r: &str) -> String {

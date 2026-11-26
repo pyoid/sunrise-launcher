@@ -684,6 +684,12 @@ fn fill(template: &str, args: &[(&str, &str)]) -> String {
     out
 }
 
+/// Marks `en` as a catalog key that reaches [`tr`] or [`trf`] later, through a constant, a
+/// field or a variable, so `lang/en.json`'s completeness test finds it. It changes nothing.
+pub const fn tr_key(en: &'static str) -> &'static str {
+    en
+}
+
 #[cfg(test)]
 #[path = "i18n/tests.rs"]
 mod tests;

@@ -369,7 +369,7 @@ fn refresh_ms(ep: &Endpoints, client_id: &str, refresh: &str) -> Result<MsTokens
 // ----- Xbox Live, XSTS, Minecraft ----------------------------------------------------------------
 
 const FAMILY_URL: &str = sunrise_launcher_addresses::MICROSOFT_FAMILY;
-const CHILD_ACCOUNT: &str = "Microsoft says this is a child account (error {code}). An adult has to add it to a Microsoft family at {url}. If it is an adult account, check its family settings there.";
+const CHILD_ACCOUNT: &str = crate::i18n::tr_key("Microsoft says this is a child account (error {code}). An adult has to add it to a Microsoft family at {url}. If it is an adult account, check its family settings there.");
 
 /// The XSTS `XErr` codes, as the official launcher explains them.
 fn xsts_error(code: u64) -> String {

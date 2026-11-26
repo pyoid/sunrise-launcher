@@ -19,8 +19,9 @@ fn project_type(kind: Kind) -> Option<&'static str> {
     }
 }
 
-const PACKS_ONLY: &str =
-    "Modrinth is searched for resource packs, data packs and shader packs only.";
+const PACKS_ONLY: &str = crate::i18n::tr_key(
+    "Modrinth is searched for resource packs, data packs and shader packs only.",
+);
 
 /// The kind of a Modrinth project; its shader packs are Iris-format ones ([`Project::support`]
 /// says which run). A data pack says it is a `mod` (most also ship a mod build): the search for data packs marks
