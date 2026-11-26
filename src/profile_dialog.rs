@@ -286,6 +286,12 @@ impl Launcher {
             }
             form = form
                 .child(channels)
+                .child(
+                    div()
+                        .text_size(px(tokens::SMALL))
+                        .text_color(rgb(p.muted))
+                        .child(tr("Dev is the newest build, published as changes land, often several times a day. Native mods are rebuilt for each new build, and some may not work until their authors update them.")),
+                )
                 .children(hint.map(|hint| {
                     div()
                         .text_size(px(tokens::SMALL))
