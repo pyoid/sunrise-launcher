@@ -1433,6 +1433,11 @@ pub(crate) fn download(
     download_cancellable(url, size, sha256, to, None, progress)
 }
 
+/// A draft release's file: its error names the whole path, for the window's error view.
+fn open_draft(path: &Path) -> Result<fs::File, String> {
+    fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 pub(crate) fn download_cancellable(
     url: &str,
     size: u64,
@@ -1445,7 +1450,7 @@ pub(crate) fn download_cancellable(
         if let Some(stop) = stop {
             stop.check()?;
         }
-        let file = fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let file = open_draft(&path)?;
         let size = file.metadata().map_or(size, |meta| meta.len());
         let name = url.rsplit('/').next().unwrap_or(url);
         let saved = match stop {
@@ -1474,7 +1479,9 @@ pub(crate) fn download_cancellable(
     let (body_tx, body_rx) = std::sync::mpsc::sync_channel::<Result<Vec<u8>, String>>(4);
     let worker_url = url.to_owned();
     let worker_stop = stop.clone();
+    let op = crate::launcher_log::current();
     std::thread::spawn(move || {
+        let _in = crate::launcher_log::enter(&op);
         let response = match get(&worker_url) {
             Ok(response) => response,
             Err(error) => {
@@ -1706,8 +1713,12 @@ pub fn install_cancellable(
     let tag = &release.tag;
     installation::recover_replacement(tag)?;
     let download = installation::GameDownload::select(release)?;
-    let proof = download.prove_cancellable(tag, stop)?;
-    let outcome = download.repair_cancellable(tag, &proof, stop, progress)?;
+    let proof = logged(format!("Checking {tag}'s signature"), || {
+        download.prove_cancellable(tag, stop)
+    })?;
+    let outcome = logged(format!("Installing {tag}"), || {
+        download.repair_cancellable(tag, &proof, stop, progress)
+    })?;
     if matches!(outcome, InstallOutcome::Installed(_)) {
         // Preparation has its own admission. Never hold the cache publication lock here;
         // managed First Play instead prepares through its profile-owned staged handoff.
@@ -1717,6 +1728,18 @@ pub fn install_cancellable(
         }
     }
     Ok(outcome)
+}
+
+/// Runs one step of an install as a `launcher.log` step: its start, then how it ended, the error
+/// included. A step that takes long then shows in the log by name, never as silence (#607).
+fn logged<T>(what: String, run: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let step = crate::launcher_log::step(what);
+    let result = run();
+    match &result {
+        Ok(_) => step.done(""),
+        Err(error) => step.failed(error),
+    }
+    result
 }
 
 /// The build's facts a launcher reads first (sunrise-org/sunrise's docs/api/release-file.md), signed beside its archives.
@@ -2318,6 +2341,16 @@ pub(crate) fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// Copy a folder, leaving out one directory or file when given.
 pub(crate) fn copy_dir_except(from: &Path, to: &Path, skip: Option<&Path>) -> std::io::Result<()> {
+    copy_dir_counted(from, to, skip, &|| Ok(()))
+}
+
+/// `copy_dir_except`, calling `copied` after each file; an error from it stops the copy.
+fn copy_dir_counted(
+    from: &Path,
+    to: &Path,
+    skip: Option<&Path>,
+    copied: &dyn Fn() -> std::io::Result<()>,
+) -> std::io::Result<()> {
     fs::create_dir_all(to)?;
     for entry in fs::read_dir(from)? {
         let entry = entry?;
@@ -2326,12 +2359,42 @@ pub(crate) fn copy_dir_except(from: &Path, to: &Path, skip: Option<&Path>) -> st
         }
         let target = to.join(entry.file_name());
         if entry.file_type()?.is_dir() {
-            copy_dir_except(&entry.path(), &target, skip)?;
+            copy_dir_counted(&entry.path(), &target, skip, copied)?;
         } else {
             crate::preparer::clone_or_copy(&entry.path(), &target)?;
+            copied()?;
         }
     }
     Ok(())
+}
+
+/// How many files `copy_dir_except` would copy, for its progress; unreadable folders count
+/// none. Stops counting, with what it has, once `stop` is set.
+fn count_files_except(
+    from: &Path,
+    skip: Option<&Path>,
+    stop: Option<&crate::native_mods::Cancellation>,
+) -> usize {
+    if stop.is_some_and(crate::native_mods::Cancellation::is_stopped) {
+        return 0;
+    }
+    let stopped = || stop.is_some_and(crate::native_mods::Cancellation::is_stopped);
+    fs::read_dir(from).map_or(0, |entries| {
+        entries
+            .flatten()
+            .take_while(|_| !stopped())
+            .filter(|entry| Some(entry.path().as_path()) != skip)
+            .map(|entry| match entry.file_type() {
+                Ok(kind) if kind.is_dir() => count_files_except(&entry.path(), skip, stop),
+                _ => 1,
+            })
+            .sum()
+    })
+}
+
+/// The error a cancelled copy stops with.
+fn copy_cancelled() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled")
 }
 
 /// After an install: when `tag` is not prepared but another installed version made the same
@@ -2339,6 +2402,17 @@ pub(crate) fn copy_dir_except(from: &Path, to: &Path, skip: Option<&Path>) -> st
 /// change both). The player then needs neither their Minecraft folder nor a new preparation to
 /// play a release that only changed Sunrise. The caller holds the target's preparation lock.
 pub(crate) fn reuse_prepared(versions: &Path, tag: &str) -> Option<String> {
+    reuse_prepared_cancellable(versions, tag, None)
+}
+
+/// [`reuse_prepared`], stopping once `stop` is set: before each donor, inside the count and the
+/// copy, and before the copy is put in place, so a cancelled one is never published.
+fn reuse_prepared_cancellable(
+    versions: &Path,
+    tag: &str,
+    stop: Option<&crate::native_mods::Cancellation>,
+) -> Option<String> {
+    let stopped = || stop.is_some_and(crate::native_mods::Cancellation::is_stopped);
     let target = versions.join(tag);
     let to = resources_at(&target);
     if to.join(RESOURCES_MANIFEST).exists() {
@@ -2346,6 +2420,9 @@ pub(crate) fn reuse_prepared(versions: &Path, tag: &str) -> Option<String> {
     }
     let version = game_version_at(&target);
     for other in installed_in(versions).into_iter().filter(|t| t != tag) {
+        if stopped() {
+            return None;
+        }
         let source = versions.join(&other);
         if game_version_at(&source) != version {
             continue;
@@ -2365,7 +2442,37 @@ pub(crate) fn reuse_prepared(versions: &Path, tag: &str) -> Option<String> {
         let _ = fs::remove_dir_all(&partial);
         // Without the data file: it names its own root, so the copy could not use it.
         let data_file = from.join(crate::preparer::DATA_FILE);
-        let copied = copy_dir_except(&from, &partial, Some(&data_file)).and_then(|_| {
+        // Often thousands of files: counted, so a long copy shows in the log and the window (#607).
+        let total = count_files_except(&from, Some(&data_file), stop);
+        let copying =
+            crate::launcher_log::step(format!("Copying {other}'s prepared files to {tag}"));
+        crate::launcher_log::play_detail(crate::i18n::tr("Copying the prepared game files"));
+        let meter = crate::launcher_log::PlayMeter::new(|done, total| {
+            crate::i18n::trf(
+                "Copying the prepared game files: {done} of {total}",
+                &[("done", &done.to_string()), ("total", &total.to_string())],
+            )
+        });
+        let done = std::cell::Cell::new(0);
+        let count = || {
+            if stopped() {
+                return Err(copy_cancelled());
+            }
+            done.set(done.get() + 1);
+            meter.tick(done.get(), total);
+            Ok(())
+        };
+        // A cancel during the count stops it before the first file is copied: the copy's own
+        // check runs after each file.
+        let copied = if stopped() {
+            Err(copy_cancelled())
+        } else {
+            copy_dir_counted(&from, &partial, Some(&data_file), &count)
+        }
+        .and_then(|_| {
+            if stopped() {
+                return Err(copy_cancelled());
+            }
             if to.join(RESOURCES_MANIFEST).exists() {
                 return Ok(false); // Prepared meanwhile, by another copy or the player.
             }
@@ -2375,9 +2482,19 @@ pub(crate) fn reuse_prepared(versions: &Path, tag: &str) -> Option<String> {
         });
         let _ = fs::remove_dir_all(&partial);
         match copied {
-            Ok(true) => return Some(other),
-            Ok(false) => return None,
-            Err(_) => {}
+            Ok(true) => {
+                copying.done(format!("{} files", done.get()));
+                return Some(other);
+            }
+            Ok(false) => {
+                copying.done("already prepared meanwhile");
+                return None;
+            }
+            Err(_) if stopped() => {
+                copying.cancelled();
+                return None;
+            }
+            Err(error) => copying.failed(error.to_string()),
         }
     }
     None
@@ -2397,32 +2514,46 @@ fn reuse_prepared_for_cancellable(tag: &str, stop: Option<&crate::native_mods::C
     let about = crate::native_mods::about(tag);
     let tag = about.as_ref().map_or(tag, |about| about.base.as_str());
     let Ok(preparation) = prepare_lock(tag) else {
+        crate::launcher_log::line(format!(
+            "{tag}: another preparation holds it, so the install leaves the prepared files to it"
+        ));
         return;
     };
     let versions = versions_dir();
-    reuse_prepared(&versions, tag);
+    reuse_prepared_cancellable(&versions, tag, stop);
     if stop.is_some_and(crate::native_mods::Cancellation::is_stopped) {
         return;
     }
     if check_prepared(tag) {
-        if let Err(error) = finish_preparation_cancellable(tag, &preparation, stop) {
-            crate::elog!("{tag}: {error}");
+        let finishing = crate::launcher_log::step(format!("Finishing {tag}'s prepared files"));
+        match finish_preparation_cancellable(tag, &preparation, stop) {
+            Ok(()) => finishing.done(""),
+            Err(error) => {
+                // Only its kind: the detail, with its paths, is for the error the window shows.
+                crate::elog!("{tag}: {}", crate::launcher_log::safe_error(&error));
+                finishing.failed(error);
+            }
         }
     }
     drop(preparation);
     if stop.is_some_and(crate::native_mods::Cancellation::is_stopped) {
         return;
     }
-    let (root, resources) = (version_dir(tag), resources(tag));
-    let spawned = std::thread::Builder::new()
-        .name("Prepared data file".into())
-        .spawn(move || {
-            if let Err(e) = write_data_file(&root, &resources) {
-                crate::elog!("{}: not written: {e}", resources.display());
-            }
-        });
-    if let Err(e) = spawned {
-        crate::elog!("{tag}: the data file was not written: {e}");
+    // Written before the install returns, not on a thread of its own: a switch or Play that
+    // follows at once takes the same preparation lock, which is never waited for, so a writer
+    // still holding it made them fail with "already being prepared". It can take a while under
+    // a virus scanner (#1961), so it says so.
+    crate::launcher_log::play_detail(crate::i18n::tr("Writing the game's data file"));
+    let writing = crate::launcher_log::step(format!("Writing {tag}'s data file"));
+    match write_data_file(&version_dir(tag), &resources(tag), stop) {
+        Ok(()) => writing.done(""),
+        Err(e) => {
+            crate::elog!(
+                "{tag}: the data file was not written: {}",
+                crate::launcher_log::safe_error(&e)
+            );
+            writing.failed(e);
+        }
     }
 }
 
@@ -2430,18 +2561,30 @@ fn reuse_prepared_for_cancellable(tag: &str, stop: Option<&crate::native_mods::C
 /// thousands: over a minute under Windows Defender (#1961), and a player who updates would pay it
 /// after every update. After `complete_assets`, as the file answers "missing" for what it lacks.
 /// The version's own preparer writes it (`data-file`); the game still writes it when this didn't, or the preparer is too old to. Only looks for the file, as the game keeps it open for the whole run, which would stop a removal on Windows.
-fn write_data_file(root: &Path, resources: &Path) -> Result<(), String> {
+/// `stop` (a switch's Cancel) reaches the preparer it runs, which then stops at once; the
+/// profile's publication cutoff is the switch's own, after this.
+fn write_data_file(
+    root: &Path,
+    resources: &Path,
+    stop: Option<&crate::native_mods::Cancellation>,
+) -> Result<(), String> {
     if resources.join(crate::preparer::DATA_FILE).exists()
         || check_play_resources(root, resources).is_err()
     {
         return Ok(());
     }
+    if let Some(stop) = stop {
+        stop.check()?;
+    }
     let version = root.file_name().unwrap_or_default().to_string_lossy();
     let preparation = prepare_lock_at(root, &version)?;
+    let handoff = match stop {
+        Some(stop) => preparation.handoff_cancellable(None, stop),
+        None => preparation.handoff(None),
+    };
     match crate::preparer::binary(root) {
         Some(binary) => {
-            crate::preparer::data_file(&binary, root, resources, Some(&preparation.handoff(None)))
-                .map(drop)
+            crate::preparer::data_file(&binary, root, resources, Some(&handoff)).map(drop)
         }
         None => Ok(()),
     }
@@ -5183,7 +5326,10 @@ fn monitor(
         let tx = tx.clone();
         let forwarding = Arc::clone(&forwarding);
         let reader_live = reader_live.clone();
+        // The preparer's own lines belong to the operation (a switch) that started it.
+        let op = crate::launcher_log::current();
         readers.push(std::thread::spawn(move || {
+            let _in = crate::launcher_log::enter(&op);
             for line in BufReader::new(stream).lines().map_while(Result::ok) {
                 let live = forwarding.lock().unwrap();
                 if !*live {
@@ -5202,7 +5348,10 @@ fn monitor(
     drop(reader_live);
     let child = Arc::new(Mutex::new(child));
     let waited = child.clone();
+    // The monitor's lines (how the preparer ended) belong to the same operation as its output.
+    let op = crate::launcher_log::current();
     std::thread::spawn(move || {
+        let _in = crate::launcher_log::enter(&op);
         let tracked = tracked;
         if !relayed {
             for r in readers {
@@ -7946,10 +8095,10 @@ pub fn {f}("
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
         let asked = || fs::read_to_string(root.join("asked")).unwrap_or_default();
         // Not prepared yet: nothing to hold, nothing asked.
-        write_data_file(&root, &resources).unwrap();
+        write_data_file(&root, &resources, None).unwrap();
         assert_eq!(asked(), "");
         fs::write(resources.join(RESOURCES_MANIFEST), "{}").unwrap();
-        write_data_file(&root, &resources).unwrap();
+        write_data_file(&root, &resources, None).unwrap();
         let args: Vec<String> = asked().lines().map(str::to_owned).collect();
         assert_eq!(args[0], "data-file");
         assert!(
@@ -7960,9 +8109,252 @@ pub fn {f}("
         // One already there stays: the game judges whether it can use it.
         fs::write(resources.join(DATA_FILE), "kept").unwrap();
         fs::remove_file(root.join("asked")).unwrap();
-        write_data_file(&root, &resources).unwrap();
+        write_data_file(&root, &resources, None).unwrap();
         assert_eq!(asked(), "");
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The data file is written before an install returns: a switch that follows at once takes
+    /// the same preparation lock, which is never waited for.
+    #[cfg(unix)]
+    #[test]
+    fn an_install_leaves_the_preparation_lock_free_when_it_returns() {
+        use std::os::unix::fs::PermissionsExt;
+        const TAG: &str = "v2026.11.25";
+        let Some(root) = std::env::var_os("INSTALL_LOCK_ROOT") else {
+            let root = tempfile::tempdir().unwrap();
+            assert!(Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "backend::tests::an_install_leaves_the_preparation_lock_free_when_it_returns",
+                ])
+                .env("INSTALL_LOCK_ROOT", root.path())
+                .env("SUNRISE_LAUNCHER_HOME", root.path())
+                .env("SUNRISE_HOME", root.path().join("home"))
+                .env("XDG_DATA_HOME", root.path().join("xdg-data"))
+                .env("XDG_CONFIG_HOME", root.path().join("xdg-config"))
+                .env("SUNRISE_LAUNCHER_NO_SELF_UPDATE", "1")
+                .env("SUNRISE_NO_AUDIO", "1")
+                .status()
+                .unwrap()
+                .success());
+            return;
+        };
+        let root = PathBuf::from(root);
+        let version = root.join("versions").join(TAG);
+        let resources = version.join(".local/sunrise-client/26.3");
+        fs::create_dir_all(&resources).unwrap();
+        fs::write(
+            version.join("research-lock.json"),
+            r#"{"minecraft":{"version":"26.3"}}"#,
+        )
+        .unwrap();
+        fs::write(version.join(COMPLETE), "").unwrap();
+        fs::write(resources.join(RESOURCES_MANIFEST), "{}").unwrap();
+        // A slow data-file writer, as one under a virus scanner: it finishes and leaves a mark.
+        let preparer = version.join("sunrise-prepare");
+        fs::write(
+            &preparer,
+            "#!/bin/sh\ncase \"$1\" in\n  data-file) sleep 1; touch \"$(dirname \"$0\")/data-file-done\"; echo '{\"format\":1,\"written\":true}';;\n  *) exit 2;;\nesac\n",
+        )
+        .unwrap();
+        fs::set_permissions(&preparer, fs::Permissions::from_mode(0o700)).unwrap();
+        reuse_prepared_for_cancellable(TAG, None);
+        assert!(
+            version.join("data-file-done").exists(),
+            "the writer finished before the install returned"
+        );
+        assert!(
+            prepare_lock(TAG).is_ok(),
+            "nothing still holds the preparation lock for the switch that follows"
+        );
+    }
+
+    /// A draft archive that can't be opened, in a draft folder with spaces in its name: the
+    /// player's error names the path, the log line only the kind of failure (review of #615).
+    #[test]
+    fn a_failed_draft_archive_logs_no_part_of_its_path() {
+        let scratch = tempfile::tempdir().unwrap();
+        let archive = scratch
+            .path()
+            .join("Private Client Backup")
+            .join("drafts")
+            .join("dev-2026-11-27-ccccccc")
+            .join("sunrise-linux-x86_64.tar.gz");
+        let before = crate::launcher_log::since(0).0;
+        let error = logged("Installing a private draft".into(), || {
+            open_draft(&archive).map(drop)
+        })
+        .unwrap_err();
+        assert!(
+            error.contains("Private Client Backup"),
+            "the window's error keeps the path: {error}"
+        );
+        let (_, lines) = crate::launcher_log::since(before);
+        let mine: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("Installing a private draft"))
+            .collect();
+        assert!(
+            mine.iter()
+                .any(|line| line.contains("failed after") && line.contains("(os error 2)")),
+            "{mine:?}"
+        );
+        for word in ["Private", "Client", "Backup", "drafts", "ccccccc", "tar.gz"] {
+            assert!(
+                mine.iter().all(|line| !line.contains(word)),
+                "{word}: {mine:?}"
+            );
+        }
+    }
+
+    /// Cancel reaches the data-file writer once it runs: the preparer it started is stopped,
+    /// and the install returns at once rather than when the writer would have finished.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancel_stops_the_data_file_writer() {
+        use std::os::unix::fs::PermissionsExt;
+        const TAG: &str = "v2026.11.25";
+        let Some(root) = std::env::var_os("DATA_FILE_CANCEL_ROOT") else {
+            let root = tempfile::tempdir().unwrap();
+            assert!(Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "backend::tests::a_cancel_stops_the_data_file_writer",
+                ])
+                .env("DATA_FILE_CANCEL_ROOT", root.path())
+                .env("SUNRISE_LAUNCHER_HOME", root.path())
+                .env("SUNRISE_HOME", root.path().join("home"))
+                .env("XDG_DATA_HOME", root.path().join("xdg-data"))
+                .env("XDG_CONFIG_HOME", root.path().join("xdg-config"))
+                .env("SUNRISE_LAUNCHER_NO_SELF_UPDATE", "1")
+                .env("SUNRISE_NO_AUDIO", "1")
+                .status()
+                .unwrap()
+                .success());
+            return;
+        };
+        let root = PathBuf::from(root);
+        let version = root.join("versions").join(TAG);
+        let resources = version.join(".local/sunrise-client/26.3");
+        fs::create_dir_all(&resources).unwrap();
+        fs::write(
+            version.join("research-lock.json"),
+            r#"{"minecraft":{"version":"26.3"}}"#,
+        )
+        .unwrap();
+        fs::write(version.join(COMPLETE), "").unwrap();
+        fs::write(resources.join(RESOURCES_MANIFEST), "{}").unwrap();
+        // A writer that would take half a minute.
+        let preparer = version.join("sunrise-prepare");
+        fs::write(
+            &preparer,
+            "#!/bin/sh\ncase \"$1\" in\n  data-file) sleep 30; echo '{\"format\":1,\"written\":true}';;\n  *) exit 2;;\nesac\n",
+        )
+        .unwrap();
+        fs::set_permissions(&preparer, fs::Permissions::from_mode(0o700)).unwrap();
+        let stop = crate::native_mods::Cancellation::default();
+        let later = stop.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            later.stop();
+        });
+        let started = std::time::Instant::now();
+        reuse_prepared_for_cancellable(TAG, Some(&stop));
+        let took = started.elapsed();
+        canceller.join().unwrap();
+        assert!(
+            took < std::time::Duration::from_secs(10),
+            "the install waited {took:?} for a cancelled writer"
+        );
+        assert!(
+            prepare_lock(TAG).is_ok(),
+            "the cancelled writer let go of the lock"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_copy_of_prepared_files_is_never_put_in_place() {
+        let versions = tempfile::tempdir().unwrap();
+        let versions = versions.path();
+        let write = |tag: &str, path: &str, text: &str| {
+            let path = versions.join(tag).join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        // As a_new_version_reuses_resources_prepared_by_a_compatible_one's compatible pair.
+        let oracle = "mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaHeightmapOracle.java";
+        let collision =
+            "mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaCollisionOracle.java";
+        for tag in ["v2026.10.13", "v2026.10.13.1"] {
+            write(tag, COMPLETE, "");
+            let lock = serde_json::json!({"minecraft": {"version": "26.3", "client_sha1": "c", "server_sha1": "s"}});
+            write(tag, "research-lock.json", &lock.to_string());
+            write(tag, "tools/prepare_native_client.py", "schema 7");
+            write(tag, oracle, "heightmap");
+            write(tag, collision, "collision");
+        }
+        let manifest =
+            serde_json::json!({"schema": 7, "collision_exporters_sha256": {collision: "x"}});
+        write(
+            "v2026.10.13",
+            &format!(".local/sunrise-client/26.3/{RESOURCES_MANIFEST}"),
+            &manifest.to_string(),
+        );
+        write(
+            "v2026.10.13",
+            ".local/sunrise-client/26.3/worldgen/biomes.json",
+            "{}",
+        );
+        let target = resources_at(&versions.join("v2026.10.13.1"));
+        let stopped = crate::native_mods::Cancellation::default();
+        stopped.stop();
+        assert_eq!(
+            reuse_prepared_cancellable(versions, "v2026.10.13.1", Some(&stopped)),
+            None
+        );
+        assert!(
+            !target.join(RESOURCES_MANIFEST).exists(),
+            "nothing published"
+        );
+        let left: Vec<_> = fs::read_dir(versions.join("v2026.10.13.1"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".partial-"))
+            .collect();
+        assert!(left.is_empty(), "no partial copy left: {left:?}");
+        // Not cancelled, the same copy goes ahead.
+        assert_eq!(
+            reuse_prepared(versions, "v2026.10.13.1"),
+            Some("v2026.10.13".into())
+        );
+        assert!(target.join(RESOURCES_MANIFEST).exists());
+    }
+
+    #[test]
+    fn a_copy_stops_at_the_file_its_callback_refuses() {
+        let from = tempfile::tempdir().unwrap();
+        for n in 0..5 {
+            fs::write(from.path().join(format!("{n}.bin")), "x").unwrap();
+        }
+        let to = tempfile::tempdir().unwrap();
+        let copied = std::cell::Cell::new(0);
+        let error = copy_dir_counted(from.path(), &to.path().join("copy"), None, &|| {
+            copied.set(copied.get() + 1);
+            if copied.get() == 2 {
+                Err(copy_cancelled())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(copied.get(), 2, "no file is copied after the refusal");
+        assert_eq!(count_files_except(from.path(), None, None), 5);
+        let stopped = crate::native_mods::Cancellation::default();
+        stopped.stop();
+        assert_eq!(count_files_except(from.path(), None, Some(&stopped)), 0);
     }
 
     #[test]

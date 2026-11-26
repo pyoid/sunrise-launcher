@@ -29,11 +29,21 @@ impl Resources {
         base: &str,
         stage: &crate::profile_txn::Staging<'_>,
     ) -> Result<Self, String> {
+        Self::capture_cancellable(base, stage, None)
+    }
+
+    /// [`Self::capture`], whose preparation and sealing stop at the next step once `stop` is
+    /// set: a cancelled switch leaves no preparer running.
+    pub(super) fn capture_cancellable(
+        base: &str,
+        stage: &crate::profile_txn::Staging<'_>,
+        stop: Option<&crate::native_mods::Cancellation>,
+    ) -> Result<Self, String> {
         let root = backend::version_dir(base);
         let preparation = backend::prepare_lock(base)?;
         match Self::current(&root)? {
             Some(resources) => Ok(resources),
-            None => Self::prepare(base, &preparation, Some(stage.handoff())),
+            None => Self::prepare_cancellable(base, &preparation, Some(stage.handoff()), stop),
         }
     }
 
@@ -84,6 +94,7 @@ impl Resources {
     }
 
     /// Finish the shared preparation under its existing lock, before a profile needs it.
+    #[cfg(test)]
     pub(crate) fn prepare(
         base: &str,
         preparation: &preparer::Preparation,
