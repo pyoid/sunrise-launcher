@@ -139,7 +139,7 @@ pub(super) fn lock_within(
             None => std::thread::sleep(Duration::from_millis(50)),
         }
     };
-    let failed = "Account operation failed. Restart the launcher.";
+    let failed = crate::i18n::tr("Account operation failed. Restart the launcher.");
     let mut process = None;
     match deadline {
         None => process = Some(store.operations().lock().map_err(|_| failed)?),
@@ -157,7 +157,7 @@ pub(super) fn lock_within(
         .map(|path| {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)
-                    .map_err(|_| "Could not create the account lock.")?;
+                    .map_err(|_| crate::i18n::tr("Could not create the account lock."))?;
             }
             let file = OpenOptions::new()
                 .create(true)
@@ -165,8 +165,8 @@ pub(super) fn lock_within(
                 .read(true)
                 .write(true)
                 .open(path)
-                .map_err(|_| "Could not open the account lock.")?;
-            let failed = "Could not lock account operations.";
+                .map_err(|_| crate::i18n::tr("Could not open the account lock."))?;
+            let failed = crate::i18n::tr("Could not lock account operations.");
             match deadline {
                 None => file.lock().map_err(|_| failed)?,
                 Some(_) => wait(&mut || match file.try_lock() {
@@ -187,7 +187,9 @@ pub(super) fn lock_within(
 fn read(store: &dyn SecretStore, uuid: &str) -> Result<Option<Secrets>, SignInError> {
     store
         .get(uuid)
-        .map_err(|_| "Could not read the keychain. Unlock it and retry.".to_string())?
+        .map_err(|_| {
+            crate::i18n::tr("Could not read the keychain. Unlock it and retry.").to_string()
+        })?
         .map(|text| serde_json::from_str(&text).map_err(|_| SignInError::DamagedSignIn))
         .transpose()
 }
@@ -236,7 +238,7 @@ pub fn refresh_with_progress(who: &str, progress: &dyn Fn(Phase)) -> Result<Stat
     let account = Accounts::load()
         .find(who)
         .cloned()
-        .ok_or("That account isn't signed in.")?;
+        .ok_or_else(|| crate::i18n::tr("That account isn't signed in.").to_string())?;
     Ok(refresh_account(
         &Endpoints::live(),
         client_id().as_deref(),
