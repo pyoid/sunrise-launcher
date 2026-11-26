@@ -1,0 +1,13 @@
+# Crowdin sync for the launcher's catalogs (docs/architecture.md, "Translations").
+# lang/en.json is the source and lists every key; each translation file holds only what has
+# been translated, so untranslated strings fall back to the English key at runtime.
+files:
+  - source: /lang/en.json
+    translation: /lang/%two_letters_code%.json
+    # Keep the catalogs sparse: an exported untranslated string would read as a finished
+    # translation that merely repeats the English.
+    skip_untranslated_strings: true
+    languages_mapping:
+      two_letters_code:
+        # Crowdin gives both Portuguese variants "pt"; the launcher's Brazilian table is pt-br.
+        pt-BR: pt-br

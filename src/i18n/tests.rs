@@ -216,6 +216,23 @@ fn a_filled_value_is_never_filled_in_turn() {
     assert_eq!(fill("{a}-{a} {b} {{a}} {", &[("a", "1")]), "1-1 {b} {1} {");
 }
 
+/// `lang/en.json` is the source a translation service reads: every key asked for in the code is
+/// in it, mapped to itself, or translators never see that string.
+#[test]
+fn the_english_catalog_lists_every_key() {
+    let (asked, _) = strings();
+    let english: HashMap<String, String> =
+        serde_json::from_str(Language::English.source()).expect("lang/en.json is valid");
+    let missing: Vec<_> = asked.iter().filter(|s| !english.contains_key(*s)).collect();
+    assert!(
+        missing.is_empty(),
+        "add these with tools/launcher_add_lang_keys.py: {missing:#?}"
+    );
+    for (key, said) in &english {
+        assert_eq!(key, said, "lang/en.json maps a key to other text");
+    }
+}
+
 #[test]
 fn the_system_language_is_the_first_one_the_launcher_has() {
     assert_eq!(Language::pick(["pl-PL", "en-US"]), Language::Polish);
