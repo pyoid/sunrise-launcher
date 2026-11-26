@@ -19,40 +19,40 @@ pub use gather::gather;
 pub const SWITCHES: [(Kind, &str, &str, &str); 4] = [
     (
         Kind::Perf,
-        "Performance statistics",
-        "How smoothly Sunrise runs on your computer, so slowdowns can be found and fixed.",
-        "After each session: frame-time percentiles and a 14-bucket histogram, tick times, peak memory and startup times, which of Sunrise's own steps held up frames of a quarter second or longer (their names in the code, how often and for how long), with your machine (OS, CPU and its cores and clocks, memory size, GPU, its memory and driver, drive type, screen size and refresh rate, laptop or desktop, on battery or not) and the settings that change performance.",
+        crate::i18n::tr_key("Performance statistics"),
+        crate::i18n::tr_key("How smoothly Sunrise runs on your computer, so slowdowns can be found and fixed."),
+        crate::i18n::tr_key("After each session: frame-time percentiles and a 14-bucket histogram, tick times, peak memory and startup times, which of Sunrise's own steps held up frames of a quarter second or longer (their names in the code, how often and for how long), with your machine (OS, CPU and its cores and clocks, memory size, GPU, its memory and driver, drive type, screen size and refresh rate, laptop or desktop, on battery or not) and the settings that change performance."),
     ),
     (
         Kind::Crash,
-        "Crash reports",
-        "A short report when the game crashes, so the crash can be fixed.",
-        "When the game crashes: the error, where in Sunrise's code it happened and on which of its threads, the native mod whose code crashed if one did, the Sunrise version, your graphics adapter and settings, and your machine (OS, CPU and its cores and clocks, memory size, GPU, its memory and driver, drive type, screen size and refresh rate, laptop or desktop, on battery or not). No log, no world or server, no user name in paths.",
+        crate::i18n::tr_key("Crash reports"),
+        crate::i18n::tr_key("A short report when the game crashes, so the crash can be fixed."),
+        crate::i18n::tr_key("When the game crashes: the error, where in Sunrise's code it happened and on which of its threads, the native mod whose code crashed if one did, the Sunrise version, your graphics adapter and settings, and your machine (OS, CPU and its cores and clocks, memory size, GPU, its memory and driver, drive type, screen size and refresh rate, laptop or desktop, on battery or not). No log, no world or server, no user name in paths."),
     ),
     (
         Kind::Bug,
-        "Bug reports",
-        "Only the bug reports you write and send yourself.",
-        "Only the reports you write and send yourself, with the game's log if you add it after reading it.",
+        crate::i18n::tr_key("Bug reports"),
+        crate::i18n::tr_key("Only the bug reports you write and send yourself."),
+        crate::i18n::tr_key("Only the reports you write and send yourself, with the game's log if you add it after reading it."),
     ),
     (
         Kind::Benchmark,
-        "Benchmark uploads",
-        "Your benchmark results, for the community results page.",
-        "The results of benchmarks you run, for the community results on playsunrise.net.",
+        crate::i18n::tr_key("Benchmark uploads"),
+        crate::i18n::tr_key("Your benchmark results, for the community results page."),
+        crate::i18n::tr_key("The results of benchmarks you run, for the community results on playsunrise.net."),
     ),
 ];
 
 /// Never sent, whatever the switches say.
-pub const NEVER: &str = "Never sent: your account name or UUID, world names, server addresses, chat, or your IP address. Each report is dated to the day, under a random install ID you can delete.";
+pub const NEVER: &str = crate::i18n::tr_key("Never sent: your account name or UUID, world names, server addresses, chat, or your IP address. Each report is dated to the day, under a random install ID you can delete.");
 
 /// The anonymous "I'm playing" ping the game sends (Ludovic's decision, 2026-10-22: count
 /// everyone, and tell them). On by default as upstream; this launcher also lets the player turn
 /// it off (`Settings::ping_off`), then starts the game with `SUNRISE_NO_HEARTBEAT`. Shown in
 /// Settings, beside the four switches.
-pub const PING_NAME: &str = "\"I'm playing\" ping";
-pub const PING_SUMMARY: &str = "Tells Sunrise, anonymously, that you're playing, so the launcher can show how many people play right now.";
-pub const PING: &str = "While you play, the game sends an anonymous \"I'm playing\" ping once a minute, so the launcher can show how many people play Sunrise right now. It holds: a random number made when the game starts and forgotten when it closes, the Sunrise version, your OS (Linux, macOS or Windows), and whether you have a world open to LAN or friends. It doesn't hold: your account, your install ID, world or server names, or anything you do in the game, and the server doesn't keep your IP address. It is on unless you turn it off.";
+pub const PING_NAME: &str = crate::i18n::tr_key("\"I'm playing\" ping");
+pub const PING_SUMMARY: &str = crate::i18n::tr_key("Tells Sunrise, anonymously, that you're playing, so the launcher can show how many people play right now.");
+pub const PING: &str = crate::i18n::tr_key("While you play, the game sends an anonymous \"I'm playing\" ping once a minute, so the launcher can show how many people play Sunrise right now. It holds: a random number made when the game starts and forgotten when it closes, the Sunrise version, your OS (Linux, macOS or Windows), and whether you have a world open to LAN or friends. It doesn't hold: your account, your install ID, world or server names, or anything you do in the game, and the server doesn't keep your IP address. It is on unless you turn it off.");
 
 /// The game sends the [`PING`] unless the player turned it off (`Settings::ping_off`).
 pub fn ping_only_if_allowed(cmd: &mut std::process::Command, allowed: bool) {

@@ -191,7 +191,7 @@ impl SecretStore for Bounded {
     }
 }
 
-pub const NO_KEYCHAIN: &str = "No keychain available: you are signed in until the launcher closes, then you will have to sign in again.";
+pub const NO_KEYCHAIN: &str = crate::i18n::tr_key("No keychain available: you are signed in until the launcher closes, then you will have to sign in again.");
 
 /// What the keychain answered when [`store`] fell back to memory.
 static NO_KEYCHAIN_WHY: OnceLock<String> = OnceLock::new();

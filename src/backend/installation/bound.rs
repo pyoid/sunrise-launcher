@@ -184,9 +184,9 @@ impl GameDownload {
             && crate::signed::title_version(source, &release.name).as_deref() != Some(tag.as_str())
         {
             let message = if Channel::of(source) == Some(Channel::Dev) {
-                "This Dev build's title ({title}) doesn't name its date and commit as Sunrise signs them, so it can't be checked: it was not installed."
+                crate::i18n::tr_key("This Dev build's title ({title}) doesn't name its date and commit as Sunrise signs them, so it can't be checked: it was not installed.")
             } else {
-                "This Nightly's title ({title}) doesn't name its date and commit as Sunrise signs them, so it can't be checked: it was not installed."
+                crate::i18n::tr_key("This Nightly's title ({title}) doesn't name its date and commit as Sunrise signs them, so it can't be checked: it was not installed.")
             };
             return Err(crate::i18n::trf(
                 message,

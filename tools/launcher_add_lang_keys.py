@@ -5,40 +5,81 @@
 only real translations; a key a language lacks shows in English. New keys therefore go into
 `en.json` alone, and Crowdin offers them to translators from there. Renaming a key carries its
 translations along; removing one removes it everywhere.
+
+Every rename is checked before any file is written: the old key must exist, the new one must not
+(that would silently drop one of the two sets of translations), and both must have the same
+`{holes}` (a carried translation would still say the old ones). Renaming a key to itself does
+nothing.
 """
 
 import argparse
 import json
+import re
+import sys
 from pathlib import Path
 
 LANG = Path(__file__).resolve().parents[1] / "lang"
-SOURCE = LANG / "en.json"
+SOURCE = "en.json"
 
 
-def load(path: Path) -> tuple[str, dict[str, str]]:
-    text = path.read_text(encoding="utf-8")
-    return text, json.loads(text)
+class RefusedRename(Exception):
+    pass
 
 
-def save(path: Path, before: str, table: dict[str, str]) -> None:
-    after = json.dumps(table, ensure_ascii=False, indent=2) + "\n"
-    if after != before:
-        path.write_text(after, encoding="utf-8")
+def holes(text: str) -> set[str]:
+    return set(re.findall(r"\{([^{}]*)\}", text))
+
+
+def check_renames(source: dict[str, str], renames: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """The renames that change something, or `RefusedRename` naming the first that can't be done."""
+    wanted = []
+    targets = set()
+    for old, new in renames:
+        if old == new:
+            continue
+        if old not in source:
+            raise RefusedRename(f"{old!r} is not a key in {SOURCE}")
+        if new in source or new in targets:
+            raise RefusedRename(
+                f"{new!r} is already a key: renaming {old!r} onto it would drop one key's translations"
+            )
+        if holes(old) != holes(new):
+            raise RefusedRename(
+                f"{old!r} and {new!r} have different {{holes}}: its translations would keep the old ones"
+            )
+        targets.add(new)
+        wanted.append((old, new))
+    return wanted
 
 
 def renamed(table: dict[str, str], old: str, new: str, source: bool) -> dict[str, str]:
     """`table` with `old` replaced by `new` in place, keeping the entry's position."""
-    out = {}
-    for key, value in table.items():
-        if key == old:
-            if new not in table:
-                out[new] = new if source else value
-        else:
-            out[key] = value
-    return out
+    return {
+        (new if key == old else key): (new if source and key == old else value)
+        for key, value in table.items()
+    }
 
 
-def main() -> None:
+def apply(lang: Path, keys: list[str], remove: list[str], renames: list[tuple[str, str]]) -> None:
+    paths = sorted(lang.glob("*.json"))
+    texts = {path: path.read_text(encoding="utf-8") for path in paths}
+    tables = {path: json.loads(text) for path, text in texts.items()}
+    renames = check_renames(tables[lang / SOURCE], renames)
+    for path, table in tables.items():
+        source = path.name == SOURCE
+        for key in remove:
+            table.pop(key, None)
+        for old, new in renames:
+            table = renamed(table, old, new, source)
+        if source:
+            for key in keys:
+                table.setdefault(key, key)
+        after = json.dumps(table, ensure_ascii=False, indent=2) + "\n"
+        if after != texts[path]:
+            path.write_text(after, encoding="utf-8")
+
+
+def main(argv: list[str] | None = None, lang: Path = LANG) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("keys", nargs="*", help="New source-English strings used by tr/trf")
     parser.add_argument("--remove", action="append", default=[], help="Obsolete key, removed everywhere")
@@ -50,22 +91,16 @@ def main() -> None:
         metavar=("OLD", "NEW"),
         help="Change a key's English, keeping its translations",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if not (args.keys or args.remove or args.rename):
         parser.error("nothing to do: give keys to add, --remove or --rename")
-
-    for path in sorted(LANG.glob("*.json")):
-        source = path == SOURCE
-        before, table = load(path)
-        for key in args.remove:
-            table.pop(key, None)
-        for old, new in args.rename:
-            table = renamed(table, old, new, source)
-        if source:
-            for key in args.keys:
-                table.setdefault(key, key)
-        save(path, before, table)
+    try:
+        apply(lang, args.keys, args.remove, [tuple(r) for r in args.rename])
+    except RefusedRename as refused:
+        print(f"Nothing changed: {refused}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
