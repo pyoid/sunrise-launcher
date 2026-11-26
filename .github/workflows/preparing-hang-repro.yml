@@ -30,7 +30,7 @@ jobs:
           "S=$S" | Out-File -Append $env:GITHUB_ENV
           @(
             "SUNRISE_HOME=$S\sr", "SUNRISE_LAUNCHER_HOME=$S\ln", "APPDATA=$S\appdata", "LOCALAPPDATA=$S\localappdata",
-            "USERPROFILE=$S\profile", "TEMP=$S\tmp", "TMP=$S\tmp",
+            "SUNRISE_LAUNCHER_LOCATION_FILE=$S\location.json", "TEMP=$S\tmp", "TMP=$S\tmp",
             "SUNRISE_LAUNCHER_TRASH=$S\trash", "SUNRISE_LAUNCHER_CLIPBOARD=$S\clip", "SUNRISE_LAUNCHER_DESKTOP=$S\desk",
             "SUNRISE_LAUNCHER_NO_SELF_UPDATE=1", "SUNRISE_NO_AUDIO=1", "SUNRISE_NO_KEYCHAIN=1", "SUNRISE_NO_HEARTBEAT=1", "SUNRISE_TELEMETRY_URL=off"
           ) | Out-File -Append $env:GITHUB_ENV
