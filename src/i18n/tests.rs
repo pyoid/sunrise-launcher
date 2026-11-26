@@ -197,6 +197,25 @@ fn translations_are_valid_and_coverage_is_reported() {
     }
 }
 
+/// A value is inserted as it is: a data folder whose path contains `{file}` must not have the
+/// next argument filled into it, or a recovery message names the wrong file to remove.
+#[test]
+fn a_filled_value_is_never_filled_in_turn() {
+    let said = fill(
+        "{key} is damaged. Remove it and {file} and sign in again.",
+        &[
+            ("key", "/home/a/{file}/accounts.key"),
+            ("file", "/home/a/{file}/accounts.json"),
+        ],
+    );
+    assert_eq!(
+        said,
+        "/home/a/{file}/accounts.key is damaged. Remove it and /home/a/{file}/accounts.json and sign in again."
+    );
+    // A hole named twice is filled both times; braces that name no argument stay as written.
+    assert_eq!(fill("{a}-{a} {b} {{a}} {", &[("a", "1")]), "1-1 {b} {1} {");
+}
+
 #[test]
 fn the_system_language_is_the_first_one_the_launcher_has() {
     assert_eq!(Language::pick(["pl-PL", "en-US"]), Language::Polish);

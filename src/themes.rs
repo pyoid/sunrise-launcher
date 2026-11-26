@@ -743,7 +743,12 @@ impl TryFrom<String> for Accent {
     type Error = String;
 
     fn try_from(name: String) -> Result<Self, Self::Error> {
-        Self::parse(&name).ok_or_else(|| format!("{name}: a colour name or a hue in degrees"))
+        Self::parse(&name).ok_or_else(|| {
+            crate::i18n::trf(
+                "{name}: a colour name or a hue in degrees",
+                &[("name", &name)],
+            )
+        })
     }
 }
 

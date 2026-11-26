@@ -85,9 +85,9 @@ fn ref_ok(r: &str) -> bool {
 /// Parses `https://github.com/<owner>/<repo>[/releases/tag/<tag> | /tree/<ref> | /commit/<sha>]`.
 pub fn parse(text: &str) -> Result<Link, String> {
     let bad = || {
-        format!(
-            "{:?} is not a GitHub link: use https://github.com/<owner>/<repo>, or .../releases/tag/<tag>, .../tree/<ref> or .../commit/<sha>.",
-            text.trim()
+        trf(
+            "{link} is not a GitHub link: use https://github.com/<owner>/<repo>, or .../releases/tag/<tag>, .../tree/<ref> or .../commit/<sha>.",
+            &[("link", &format!("{:?}", text.trim()))],
         )
     };
     let text = text.trim();
@@ -196,7 +196,7 @@ pub fn api(path: &str) -> Result<Option<serde_json::Value>, String> {
     match backend::get_unless_missing(&url) {
         Ok(Some(response)) => response.into_json().map(Some).map_err(|e| e.to_string()),
         Ok(None) => Ok(None),
-        Err(e) if e.contains("rate limit") => Err(RATE_LIMIT.into()),
+        Err(e) if e.contains("rate limit") => Err(tr(RATE_LIMIT).into()),
         Err(e) => Err(e),
     }
 }
@@ -582,9 +582,9 @@ fn checked(bytes: &[u8], dir: &Path, asset: Option<&Asset>) -> Result<Packed, St
             .as_ref()
             .is_some_and(|expected| *expected != sum)
     }) {
-        return Err(format!(
-            "{} does not match the checksum GitHub lists for it.",
-            asset.name
+        return Err(trf(
+            "{name} does not match the checksum GitHub lists for it.",
+            &[("name", &asset.name.to_string())],
         ));
     }
     fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
