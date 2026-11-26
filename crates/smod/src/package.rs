@@ -1,6 +1,7 @@
-//! Which files of a package are its source, and which of them are refused: the mod tools' one file
-//! list and binary rule, copied from the game's `sunrise-mod-source` (`package.rs`,
-//! tools/tests/test_game_copies.py), so the launcher packs and checks a mod by the same rule.
+//! The launcher's own source-file selector and prebuilt-binary rule for mod packages.
+//! The selector is ahead of the game's `sunrise-mod-source` selector at the commit pinned in
+//! `tools/ci/sunrise-commit`: it handles Cargo package filters and nested path dependencies.
+//! `tools/tests/test_game_copies.py` does not cover this module.
 use crate::manifest::USES_FILE;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::{io, path::Path};
