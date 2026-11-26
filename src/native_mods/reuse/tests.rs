@@ -628,7 +628,7 @@ fn an_installed_build_that_changed_misses() {
     let copy = installed
         .join(sunrise_launcher_smod::mod_list::NATIVE_DIR)
         .join("beta");
-    let moved = set.root.join("beta-copy");
+    let moved = installed.join("beta-copy");
     fs::rename(&copy, &moved).unwrap();
     assert!(set.found().is_none(), "a missing mod copy");
     fs::rename(&moved, &copy).unwrap();
