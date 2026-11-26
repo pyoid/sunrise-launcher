@@ -1886,27 +1886,26 @@ fn pipeline(
         digests: &digests,
         left_out: &left_out,
     };
-    // A client build is used again only when the build there holds this plan; else the plan
-    // installs under the next version (`reuse::versions`).
-    let (version, exists) = match target {
-        Target::Client => reuse::installable(&version, &contents)?,
-        Target::Server => {
-            let exists = target.directory(&version).join(".installed").is_file();
-            (version, exists)
-        }
+    // Reuse a client build only when it holds this plan's image; otherwise try the next slot.
+    let image = (target == Target::Client)
+        .then(|| reuse::Image::new(&mods, &mixins_pins, &ordered, &dispatch, &left_out, &read));
+    let (version, evidence) = match &image {
+        Some(image) => reuse::installable(&version, &contents, image)?,
+        None => (version, None),
     };
-    // Kept beside a client build once it is installed or used again: what the fast path proves
-    // it with next time (`reuse`).
+    let exists = evidence.is_some()
+        || (target == Target::Server && target.directory(&version).join(".installed").is_file());
+    // Keep the admission with the proof of this client's installed image.
     let record = || {
-        if target != Target::Client {
-            return;
+        if let Some(image) = &image {
+            reuse::record(
+                &version,
+                &contents,
+                image,
+                reuse::Admission::new(base, origin, options.exact_home.is_some()),
+                evidence,
+            );
         }
-        reuse::record(&reuse::Planned {
-            version: &version,
-            image: reuse::Image::new(&mods, &mixins_pins, &ordered, &dispatch, &left_out, &read),
-            admission: reuse::Admission::new(base, origin, options.exact_home.is_some()),
-            contents: &contents,
-        });
     };
     if let Some(stage) = options.staging {
         let _publication = crate::run_leases::installation().map_err(cache_error)?;
