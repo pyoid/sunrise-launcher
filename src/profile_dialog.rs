@@ -81,6 +81,7 @@ impl Launcher {
             d.error.clone(),
         );
         let editing = d.editing.is_some();
+        let discarding = d.discarding;
         let picture_focus = d.picture_focus.clone();
         let picture_focused = picture_focus.is_focused(window);
         let picture = d
@@ -424,34 +425,7 @@ impl Launcher {
                     .child(form.child(start).child(icons)),
             )
             .children(error.map(|e| div().text_color(rgb(p.danger)).child(e)))
-            .child(
-                row()
-                    .justify_end()
-                    .child(button("new-cancel", tr("Cancel")).on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.close_instance_dialog();
-                            cx.notify();
-                        },
-                    )))
-                    .child(
-                        primary(
-                            "new-save",
-                            match (editing, busy) {
-                                (true, true) => tr("Saving…"),
-                                (true, false) => tr("Save"),
-                                (false, true) => tr("Creating…"),
-                                (false, false) => tr("Create"),
-                            },
-                        )
-                        .when(!ready, |d| d.opacity(0.45).tab_stop(false))
-                        .when(ready, |d| {
-                            d.on_click(cx.listener(|this, _, _, cx| {
-                                this.save_instance(cx);
-                                cx.notify();
-                            }))
-                        }),
-                    ),
-            );
+            .child(self.profile_dialog_foot(editing, busy, ready, discarding, cx));
         Some(crate::sheets::modal_frame(
             "new-profile",
             680.,
@@ -459,5 +433,68 @@ impl Launcher {
             cx,
             Launcher::close_instance_dialog,
         ))
+    }
+
+    /// Cancel and Create (or Save), or, once a close found edits not saved, the question
+    /// whether to drop them: Keep editing goes back to the form, Discard closes it.
+    fn profile_dialog_foot(
+        &self,
+        editing: bool,
+        busy: bool,
+        ready: bool,
+        discarding: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let row = div().flex().items_center().justify_end().gap(px(8.));
+        if discarding {
+            return row
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(tr("Discard your changes?")),
+                )
+                .child(button("new-keep", tr("Keep editing")).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        if let Some(d) = &mut this.instances.dialog {
+                            d.discarding = false;
+                        }
+                        cx.notify();
+                    },
+                )))
+                .child(
+                    crate::settings::danger(button("new-discard", tr("Discard"))).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.instances.dialog = None;
+                            cx.notify();
+                        }),
+                    ),
+                );
+        }
+        row.child(
+            button("new-cancel", tr("Cancel")).on_click(cx.listener(|this, _, _, cx| {
+                this.close_instance_dialog();
+                cx.notify();
+            })),
+        )
+        .child(
+            primary(
+                "new-save",
+                match (editing, busy) {
+                    (true, true) => tr("Saving…"),
+                    (true, false) => tr("Save"),
+                    (false, true) => tr("Creating…"),
+                    (false, false) => tr("Create"),
+                },
+            )
+            .when(!ready, |d| d.opacity(0.45).tab_stop(false))
+            .when(ready, |d| {
+                d.on_click(cx.listener(|this, _, _, cx| {
+                    this.save_instance(cx);
+                    cx.notify();
+                }))
+            }),
+        )
     }
 }

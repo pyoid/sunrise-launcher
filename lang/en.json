@@ -645,5 +645,8 @@
   "Edit profile": "Edit profile",
   "Edit profile…": "Edit profile…",
   "Rename it, move it to a group or pick another icon.": "Rename it, move it to a group or pick another icon.",
-  "Save": "Save"
+  "Save": "Save",
+  "Discard your changes?": "Discard your changes?",
+  "Keep editing": "Keep editing",
+  "Discard": "Discard"
 }
