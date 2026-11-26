@@ -73,9 +73,9 @@ fn play_names_the_step_it_is_at_while_the_game_starts() {
         ..idle()
     };
     assert_eq!(done.view().main, Main::Play);
-    assert_eq!(done.view().said, None);
+    assert_eq!(done.view().play_detail, None);
 
-    // Live counted detail shows beside/under "Preparing…" while Play is working.
+    // Live counted detail shows in the reserved play_detail slot (not `said`) while Play is working.
     let preparing = Facts {
         starting: true,
         step: Some(backend::PlayStep::Prepare),
@@ -84,8 +84,9 @@ fn play_names_the_step_it_is_at_while_the_game_starts() {
     };
     let view = preparing.view();
     assert_eq!(view.main.label(), "Preparing…");
+    assert_eq!(view.said, None);
     assert_eq!(
-        view.said.as_deref(),
+        view.play_detail.as_deref(),
         Some("Downloading Minecraft's files: 120 of 4000")
     );
     assert!(!view.failed);

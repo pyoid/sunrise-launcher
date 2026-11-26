@@ -110,6 +110,8 @@ pub(crate) struct View {
     pub enabled: bool,
     /// One sentence beside Play: a problem, a held update, a newer build.
     pub said: Option<String>,
+    /// Live counted Play step detail shown in the reserved line above Play (never moves the Play row).
+    pub play_detail: Option<String>,
     /// That sentence is a problem.
     pub failed: bool,
     pub act: Option<Act>,
@@ -276,17 +278,14 @@ impl Facts {
             .as_ref()
             .filter(|_| !busy && !self.running);
         let failed = (recovery.is_some() || brief.is_some()) && !self.building;
-        let active_detail = self
+        let play_detail = self
             .play_detail
             .clone()
             .filter(|_| busy && !self.building && !failed);
-        let said = active_detail
-            .or_else(|| {
-                recovery
-                    .map(|_| tr("A mod install couldn't be finished.").into())
-                    .or(brief)
-                    .filter(|_| !self.building)
-            })
+        let said = recovery
+            .map(|_| tr("A mod install couldn't be finished.").into())
+            .or(brief)
+            .filter(|_| !self.building)
             .or_else(|| hold.clone())
             .or_else(|| update.map(|build| trf("{build} is available", &[("build", build)])));
         let way_out = match failed_at {
@@ -320,6 +319,7 @@ impl Facts {
                 busy && !matches!(main, Main::RegistryInstall(_, true)),
             ) && main != Main::SignIn,
             said,
+            play_detail,
             failed,
             act,
             mods_off,
@@ -422,7 +422,13 @@ impl View {
                 }
                 _ => StripAct::Home,
             };
-            return Some((self.main.label(), act));
+            return Some((
+                self.play_detail
+                    .clone()
+                    .map(Into::into)
+                    .unwrap_or_else(|| self.main.label()),
+                act,
+            ));
         }
         match (&self.said, &self.act) {
             (Some(said), Some(act @ (Act::BuildResult | Act::Notice { .. }))) if self.failed => {
