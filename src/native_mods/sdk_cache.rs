@@ -544,7 +544,8 @@ fn compare_versions(a: &str, b: &str) -> Option<std::cmp::Ordering> {
     Some(parts(a)?.cmp(&parts(b)?))
 }
 
-/// The kept `surface.json` of `sdk`'s build, else fetched from `base`, checked against the index and kept. Kept, so a fit is told offline once a build was seen.
+/// The verified `surface.json` of `sdk`'s build: reused offline if it still matches the index,
+/// otherwise fetched from `base`, verified and kept.
 pub(super) fn surface_file(sdk: &Sdk, base: &Base) -> Result<PathBuf, Refusal> {
     const NAME: &str = "surface.json";
     let build = sdk.shown();
@@ -555,8 +556,7 @@ pub(super) fn surface_file(sdk: &Sdk, base: &Base) -> Result<PathBuf, Refusal> {
     let kept = sdk.dir.join(NAME);
     let listed = sdk.index.asset(NAME).map_err(|r| refused(r.to_string()))?;
     match fs::read(&kept) {
-        // Kept only once verified; a size that changed since is fetched again.
-        Ok(bytes) if bytes.len() as u64 == listed.size => return Ok(kept),
+        Ok(bytes) if sdk.index.verify(NAME, bytes.as_slice()).is_ok() => return Ok(kept),
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
             return Err(Refusal::Cache(format!("{}: {error}", kept.display())));
         }
