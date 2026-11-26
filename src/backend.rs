@@ -5145,6 +5145,25 @@ pub fn monitor_game(child: Child, tx: Sender<Msg>, runtime: RuntimeGuard) -> Run
     monitor(Job::Client, child, tx, runtime, None, None)
 }
 
+/// Runs a worker thread's body; if it panics, logs the panic to launcher.log and hands
+/// `on_panic` the message the player reads, so the worker's usual failure message still goes out
+/// and the waiting state it would have cleared does not stay up for good.
+pub fn report_panic(body: impl FnOnce(), on_panic: impl FnOnce(String)) {
+    let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) else {
+        return;
+    };
+    let detail = payload
+        .downcast_ref::<&str>()
+        .map(|text| text.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".into());
+    crate::launcher_log::line(format!("A launcher thread panicked: {detail}"));
+    on_panic(crate::i18n::trf(
+        "The launcher hit an internal error: {message}",
+        &[("message", &detail)],
+    ));
+}
+
 fn monitor(
     job: Job,
     mut child: Child,
@@ -5192,71 +5211,79 @@ fn monitor(
     drop(reader_live);
     let child = Arc::new(Mutex::new(child));
     let waited = child.clone();
+    let panicked = tx.clone();
     std::thread::spawn(move || {
-        let tracked = tracked;
-        if !relayed {
-            for r in readers {
-                let _ = r.join();
-            }
-        }
-        // Wrapper output can stay open after the game itself has exited.
-        let status = loop {
-            if let Some(s) = waited.lock().unwrap().try_wait().transpose() {
-                break s;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        };
-        if relayed {
-            // Exit can overtake the pumps. Give buffered final diagnostics time to reach
-            // the log, but don't wait for the wrapper or its descendants to close a pipe.
-            let _ = readers_done.recv_timeout(std::time::Duration::from_millis(200));
-        }
-        *forwarding.lock().unwrap() = false;
-        if let (Job::Client, Ok(status)) = (job, &status) {
-            #[cfg(unix)]
-            let signal = std::os::unix::process::ExitStatusExt::signal(status);
-            #[cfg(not(unix))]
-            let signal: Option<i32> = None;
-            let how = match (status.code(), signal) {
-                (Some(code), _) => format!("exited with code {code}"),
-                (None, Some(signal)) => format!("was stopped by signal {signal}"),
-                (None, None) => "ended without an exit code".into(),
-            };
-            crate::launcher_log::line(format!(
-                "The game {how} after {} s",
-                began.elapsed().as_secs()
-            ));
-        }
-        if relayed {
-            if let Err(error) = status {
-                let _ = tx.send(Msg::ClientObservationLost(
-                    crate::process::child::unconfirmed_exit(error),
-                ));
-                return;
-            }
-        }
-        if group {
-            crate::process::owned::CHILDREN.release(pid);
-        }
-        drop(tracked);
-        let cancelled = stop.as_ref().is_some_and(|stop| stop.is_stopped());
-        let result = if cancelled {
-            runtime.game_exited();
-            Err(crate::native_mods::CANCELLED.into())
-        } else {
-            status.map_err(|e| e.to_string()).and_then(|s| {
-                let result = match prepare {
-                    Some((tag, preparation)) if s.success() => {
-                        finish_preparation_cancellable(&tag, &preparation, stop.as_ref())
+        report_panic(
+            move || {
+                let tracked = tracked;
+                if !relayed {
+                    for r in readers {
+                        let _ = r.join();
                     }
-                    _ if s.success() => Ok(()),
-                    _ => Err(format!("Exited with {s}")),
+                }
+                // Wrapper output can stay open after the game itself has exited.
+                let status = loop {
+                    if let Some(s) = waited.lock().unwrap().try_wait().transpose() {
+                        break s;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 };
-                runtime.game_exited();
-                result
-            })
-        };
-        let _ = tx.send(Msg::Exit(job, result));
+                if relayed {
+                    // Exit can overtake the pumps. Give buffered final diagnostics time to reach
+                    // the log, but don't wait for the wrapper or its descendants to close a pipe.
+                    let _ = readers_done.recv_timeout(std::time::Duration::from_millis(200));
+                }
+                *forwarding.lock().unwrap() = false;
+                if let (Job::Client, Ok(status)) = (job, &status) {
+                    #[cfg(unix)]
+                    let signal = std::os::unix::process::ExitStatusExt::signal(status);
+                    #[cfg(not(unix))]
+                    let signal: Option<i32> = None;
+                    let how = match (status.code(), signal) {
+                        (Some(code), _) => format!("exited with code {code}"),
+                        (None, Some(signal)) => format!("was stopped by signal {signal}"),
+                        (None, None) => "ended without an exit code".into(),
+                    };
+                    crate::launcher_log::line(format!(
+                        "The game {how} after {} s",
+                        began.elapsed().as_secs()
+                    ));
+                }
+                if relayed {
+                    if let Err(error) = status {
+                        let _ = tx.send(Msg::ClientObservationLost(
+                            crate::process::child::unconfirmed_exit(error),
+                        ));
+                        return;
+                    }
+                }
+                if group {
+                    crate::process::owned::CHILDREN.release(pid);
+                }
+                drop(tracked);
+                let cancelled = stop.as_ref().is_some_and(|stop| stop.is_stopped());
+                let result = if cancelled {
+                    runtime.game_exited();
+                    Err(crate::native_mods::CANCELLED.into())
+                } else {
+                    status.map_err(|e| e.to_string()).and_then(|s| {
+                        let result = match prepare {
+                            Some((tag, preparation)) if s.success() => {
+                                finish_preparation_cancellable(&tag, &preparation, stop.as_ref())
+                            }
+                            _ if s.success() => Ok(()),
+                            _ => Err(format!("Exited with {s}")),
+                        };
+                        runtime.game_exited();
+                        result
+                    })
+                };
+                let _ = tx.send(Msg::Exit(job, result));
+            },
+            |message| {
+                let _ = panicked.send(Msg::Exit(job, Err(message)));
+            },
+        );
     });
     Running { child, stdin }
 }
@@ -5686,6 +5713,20 @@ mod tests {
     use super::*;
     use std::cmp::Ordering::*;
     use std::ffi::OsStr;
+
+    #[test]
+    fn a_panicking_worker_body_reports_the_internal_error_message() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        report_panic(
+            || panic!("the body broke"),
+            |message| tx.send(message).unwrap(),
+        );
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            "The launcher hit an internal error: the body broke"
+        );
+        report_panic(|| (), |_| panic!("not called without a panic"));
+    }
 
     #[cfg(unix)]
     #[test]

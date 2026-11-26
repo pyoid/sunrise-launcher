@@ -198,12 +198,20 @@ impl Launcher {
         self.install_started = Some(Instant::now());
         self.bar = (0., 0.);
         self.install_error = None;
+        let (panic_tx, panic_tag) = (tx.clone(), tag.clone());
         std::thread::spawn(move || {
-            let progress = |p| {
-                let _ = tx.send(Msg::Progress(tag.clone(), p));
-            };
-            let result = backend::install_cancellable(&release, stop.as_ref(), progress);
-            let _ = tx.send(Msg::Installed(tag, result));
+            backend::report_panic(
+                move || {
+                    let progress = |p| {
+                        let _ = tx.send(Msg::Progress(tag.clone(), p));
+                    };
+                    let result = backend::install_cancellable(&release, stop.as_ref(), progress);
+                    let _ = tx.send(Msg::Installed(tag, result));
+                },
+                |message| {
+                    let _ = panic_tx.send(Msg::Installed(panic_tag, Err(message)));
+                },
+            );
         });
     }
 
@@ -238,35 +246,45 @@ impl Launcher {
             .push_back("Checking Java and your Minecraft install".into());
         let tx = self.tx.clone();
         // The checks may download the server jar, so they run on the thread too.
+        let panic_tx = tx.clone();
         std::thread::spawn(move || {
-            let log = |line| {
-                let _ = tx.send(Msg::Line(Job::Prepare, line));
-            };
-            let result = (|| {
-                let lock = backend::prepare_lock(&tag)?;
-                let (cmd, minecraft) = match &stop {
-                    Some(stop) => {
-                        backend::preparer_cancellable(&tag, &minecraft, from, &log, &lock, stop)?
+            backend::report_panic(
+                move || {
+                    let log = |line| {
+                        let _ = tx.send(Msg::Line(Job::Prepare, line));
+                    };
+                    let result = (|| {
+                        let lock = backend::prepare_lock(&tag)?;
+                        let (cmd, minecraft) = match &stop {
+                            Some(stop) => backend::preparer_cancellable(
+                                &tag, &minecraft, from, &log, &lock, stop,
+                            )?,
+                            None => backend::preparer(&tag, &minecraft, from, &log, &lock)?,
+                        };
+                        match &stop {
+                            Some(stop) => {
+                                backend::sounds_cancellable(&tag, &minecraft, &log, &lock, stop)
+                            }
+                            None => backend::sounds(&tag, &minecraft, &log, &lock),
+                        }
+                        backend::set_prepare_step(backend::PrepareStep::Prepare);
+                        backend::spawn_holding_cancellable(
+                            Job::Prepare,
+                            cmd,
+                            tx.clone(),
+                            Some((tag, lock)),
+                            stop,
+                        )
+                    })();
+                    // A running preparer sends its own Exit when it ends.
+                    if let Err(e) = result {
+                        let _ = tx.send(Msg::Exit(Job::Prepare, Err(e)));
                     }
-                    None => backend::preparer(&tag, &minecraft, from, &log, &lock)?,
-                };
-                match &stop {
-                    Some(stop) => backend::sounds_cancellable(&tag, &minecraft, &log, &lock, stop),
-                    None => backend::sounds(&tag, &minecraft, &log, &lock),
-                }
-                backend::set_prepare_step(backend::PrepareStep::Prepare);
-                backend::spawn_holding_cancellable(
-                    Job::Prepare,
-                    cmd,
-                    tx.clone(),
-                    Some((tag, lock)),
-                    stop,
-                )
-            })();
-            // A running preparer sends its own Exit when it ends.
-            if let Err(e) = result {
-                let _ = tx.send(Msg::Exit(Job::Prepare, Err(e)));
-            }
+                },
+                |message| {
+                    let _ = panic_tx.send(Msg::Exit(Job::Prepare, Err(message)));
+                },
+            );
         });
         self.preparing = true;
         self.prepare_started = Some(Instant::now());
@@ -353,94 +371,113 @@ impl Launcher {
         let cancellation = native_mods::Cancellation::default();
         self.native_cancellation = Some(cancellation.clone());
         let tx = self.tx.clone();
+        let (panic_tx, panic_instance) = (tx.clone(), instance.clone());
         std::thread::spawn(move || {
-            // Download progress arrives many times; each step is said once, when it begins.
-            let announced = std::cell::Cell::new(None);
-            let announce = |step: backend::PlayStep, what: &str| {
-                if announced.replace(Some(step)) != Some(step) {
-                    backend::play_step(what);
-                }
-            };
-            let result = Client {
-                instance: &instance,
-                accepted_account: intent.account.as_deref(),
-                explicit_account: false,
-                piped: true,
-            }
-            .start_with_recovery(
-                recovery,
-                || {
-                    if let Some(tag) = target
-                        .as_deref()
-                        .filter(|tag| backend::installed().iter().any(|found| found == tag))
-                    {
-                        FirstBuild::installed(tag)
-                    } else if let Some(release) = release {
-                        FirstBuild::download(&release)
-                    } else {
-                        Err(absent)
-                    }
-                },
-                |cmd| {
-                    intent.destination.apply(cmd)?;
-                    backend::append_game_args(cmd);
-                    Ok(())
-                },
-                |cmd| {
-                    jar_launch::with_consent(&tx, |permission| {
-                        sunrise_launcher::jars::prepare_for_command(cmd, permission)
-                    })
-                    .map_err(|error| error.to_string())
-                },
-                &cancellation,
-                |progress| {
-                    let msg = match progress {
-                        Progress::Download(_) => {
-                            announce(backend::PlayStep::Download, "downloading the game");
-                            Msg::PlayStep(backend::PlayStep::Download)
-                        }
-                        Progress::Prepare => {
-                            announce(backend::PlayStep::Prepare, "preparing the game's files");
-                            Msg::PlayStep(backend::PlayStep::Prepare)
-                        }
-                        Progress::NativeBuild { base, mods } => {
-                            announce(backend::PlayStep::Native, "building mods");
-                            Msg::ManagedBuild {
-                                instance: instance.id.clone(),
-                                profile: instance.name.clone(),
-                                base,
-                                mods,
-                            }
-                        }
-                        Progress::Native(step) => Msg::NativeProgress(step),
-                        Progress::NativeLog(output) => Msg::ManagedBuildLog(output),
-                        Progress::Verify => {
-                            announce(backend::PlayStep::Assets, "checking the game's files");
-                            Msg::PlayStep(backend::PlayStep::Assets)
-                        }
-                        Progress::SignIn => {
-                            announce(backend::PlayStep::SignIn, "reading the sign-in");
-                            Msg::PlayStep(backend::PlayStep::SignIn)
-                        }
-                        Progress::Line(line) | Progress::HookLine(line) => {
-                            Msg::Line(Job::Prepare, line)
+            backend::report_panic(
+                move || {
+                    // Download progress arrives many times; each step is said once, when it begins.
+                    let announced = std::cell::Cell::new(None);
+                    let announce = |step: backend::PlayStep, what: &str| {
+                        if announced.replace(Some(step)) != Some(step) {
+                            backend::play_step(what);
                         }
                     };
-                    let _ = tx.send(msg);
+                    let result = Client {
+                        instance: &instance,
+                        accepted_account: intent.account.as_deref(),
+                        explicit_account: false,
+                        piped: true,
+                    }
+                    .start_with_recovery(
+                        recovery,
+                        || {
+                            if let Some(tag) = target
+                                .as_deref()
+                                .filter(|tag| backend::installed().iter().any(|found| found == tag))
+                            {
+                                FirstBuild::installed(tag)
+                            } else if let Some(release) = release {
+                                FirstBuild::download(&release)
+                            } else {
+                                Err(absent)
+                            }
+                        },
+                        |cmd| {
+                            intent.destination.apply(cmd)?;
+                            backend::append_game_args(cmd);
+                            Ok(())
+                        },
+                        |cmd| {
+                            jar_launch::with_consent(&tx, |permission| {
+                                sunrise_launcher::jars::prepare_for_command(cmd, permission)
+                            })
+                            .map_err(|error| error.to_string())
+                        },
+                        &cancellation,
+                        |progress| {
+                            let msg = match progress {
+                                Progress::Download(_) => {
+                                    announce(backend::PlayStep::Download, "downloading the game");
+                                    Msg::PlayStep(backend::PlayStep::Download)
+                                }
+                                Progress::Prepare => {
+                                    announce(
+                                        backend::PlayStep::Prepare,
+                                        "preparing the game's files",
+                                    );
+                                    Msg::PlayStep(backend::PlayStep::Prepare)
+                                }
+                                Progress::NativeBuild { base, mods } => {
+                                    announce(backend::PlayStep::Native, "building mods");
+                                    Msg::ManagedBuild {
+                                        instance: instance.id.clone(),
+                                        profile: instance.name.clone(),
+                                        base,
+                                        mods,
+                                    }
+                                }
+                                Progress::Native(step) => Msg::NativeProgress(step),
+                                Progress::NativeLog(output) => Msg::ManagedBuildLog(output),
+                                Progress::Verify => {
+                                    announce(
+                                        backend::PlayStep::Assets,
+                                        "checking the game's files",
+                                    );
+                                    Msg::PlayStep(backend::PlayStep::Assets)
+                                }
+                                Progress::SignIn => {
+                                    announce(backend::PlayStep::SignIn, "reading the sign-in");
+                                    Msg::PlayStep(backend::PlayStep::SignIn)
+                                }
+                                Progress::Line(line) | Progress::HookLine(line) => {
+                                    Msg::Line(Job::Prepare, line)
+                                }
+                            };
+                            let _ = tx.send(msg);
+                        },
+                    );
+                    if let Err(std::sync::mpsc::SendError(Msg::ManagedClient { result, .. })) = tx
+                        .send(Msg::ManagedClient {
+                            instance: Box::new(instance),
+                            result: Box::new(result),
+                        })
+                    {
+                        if let Ok(game) = *result {
+                            // The admitted child owns its claims now. Closing the window does
+                            // not stop it; drain its streams until this launcher exits.
+                            backend::monitor_game(game.child, tx, game.runtime);
+                        }
+                    }
+                },
+                |message| {
+                    let _ = panic_tx.send(Msg::ManagedClient {
+                        instance: Box::new(panic_instance),
+                        result: Box::new(Err(sunrise_launcher::managed_play::StartError::Other(
+                            message,
+                        ))),
+                    });
                 },
             );
-            if let Err(std::sync::mpsc::SendError(Msg::ManagedClient { result, .. })) =
-                tx.send(Msg::ManagedClient {
-                    instance: Box::new(instance),
-                    result: Box::new(result),
-                })
-            {
-                if let Ok(game) = *result {
-                    // The admitted child owns its claims now. Closing the window does
-                    // not stop it; drain its streams until this launcher exits.
-                    backend::monitor_game(game.child, tx, game.runtime);
-                }
-            }
         });
     }
 
@@ -476,17 +513,27 @@ impl Launcher {
             .map(|i| i.home.clone());
         let mods_tx = self.mods.tx.clone();
         self.starting_play = Some(intent);
+        let panic_tx = tx.clone();
         std::thread::spawn(move || {
-            // One line per step: a terminal run shows where Play stops (#12179).
-            backend::play_step("checking the game's assets");
-            let _ = tx.send(Msg::PlayStep(backend::PlayStep::Assets));
-            backend::complete_assets(&tag);
-            continue_after_assets(
-                &tag,
-                accepted.as_deref(),
-                legacy_home.as_deref(),
-                &tx,
-                &mods_tx,
+            backend::report_panic(
+                || {
+                    // One line per step: a terminal run shows where Play stops (#12179).
+                    backend::play_step("checking the game's assets");
+                    let _ = tx.send(Msg::PlayStep(backend::PlayStep::Assets));
+                    backend::complete_assets(&tag);
+                    continue_after_assets(
+                        &tag,
+                        accepted.as_deref(),
+                        legacy_home.as_deref(),
+                        &tx,
+                        &mods_tx,
+                    );
+                },
+                |message| {
+                    let _ = panic_tx.send(Msg::Session(Err(account::NoOwner {
+                        keyring: Some(message),
+                    })));
+                },
             );
         });
     }
