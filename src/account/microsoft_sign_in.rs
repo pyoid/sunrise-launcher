@@ -35,10 +35,10 @@ impl Endpoints {
             .ok()
             .filter(|_| cfg!(debug_assertions));
         // The same for the Minecraft services (the profile, its skin and capes), to see and
-        // screenshot the Skins tab against a local mock.
+        // screenshot the Skins tab against a local mock. Unit tests also use it in release mode.
         let minecraft = std::env::var("SUNRISE_MINECRAFT_SERVICES_ENDPOINT")
             .ok()
-            .filter(|_| cfg!(debug_assertions));
+            .filter(|_| cfg!(any(test, debug_assertions)));
         Self::at(microsoft.as_deref(), minecraft.as_deref())
     }
 
