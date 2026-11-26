@@ -1,0 +1,117 @@
+name: Preparing hang repro (1.3.4, Windows)
+# Scratch reproduction of "stuck on Preparing" with the released v1.3.4; runs on pushes to this branch only.
+on:
+  push:
+    branches: [sunrise-launcher-preparing-hang-repro]
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Scratch home and the released v1.3.4
+        shell: pwsh
+        run: |
+          $S = Join-Path $env:RUNNER_TEMP 'scratch'
+          foreach ($d in 'sr','ln','appdata','localappdata','trash','clip','desk','profile','tmp','out') { New-Item -ItemType Directory -Force (Join-Path $S $d) | Out-Null }
+          $base = 'https://github.com/sunrise-org/sunrise-launcher/releases/download/v1.3.4'
+          Invoke-WebRequest "$base/SHA256SUMS" -OutFile "$S\SHA256SUMS"
+          Invoke-WebRequest "$base/sunrise-launcher-windows-x64.zip" -OutFile "$S\launcher.zip"
+          $want = (Select-String -Path "$S\SHA256SUMS" -Pattern 'sunrise-launcher-windows-x64.zip').Line.Split(' ')[0].ToLower()
+          $got = (Get-FileHash "$S\launcher.zip" -Algorithm SHA256).Hash.ToLower()
+          "want $want`ngot  $got"
+          if ($want -ne $got) { throw 'sha256 mismatch' }
+          Expand-Archive "$S\launcher.zip" -DestinationPath "$S\app"
+          $exe = (Get-ChildItem -Recurse "$S\app" -Filter 'sunrise-launcher.exe' | Select-Object -First 1).FullName
+          "EXE=$exe" | Out-File -Append $env:GITHUB_ENV
+          "S=$S" | Out-File -Append $env:GITHUB_ENV
+          @(
+            "SUNRISE_HOME=$S\sr", "SUNRISE_LAUNCHER_HOME=$S\ln", "APPDATA=$S\appdata", "LOCALAPPDATA=$S\localappdata",
+            "USERPROFILE=$S\profile", "TEMP=$S\tmp", "TMP=$S\tmp",
+            "SUNRISE_LAUNCHER_TRASH=$S\trash", "SUNRISE_LAUNCHER_CLIPBOARD=$S\clip", "SUNRISE_LAUNCHER_DESKTOP=$S\desk",
+            "SUNRISE_LAUNCHER_NO_SELF_UPDATE=1", "SUNRISE_NO_AUDIO=1", "SUNRISE_NO_KEYCHAIN=1", "SUNRISE_NO_HEARTBEAT=1", "SUNRISE_TELEMETRY_URL=off"
+          ) | Out-File -Append $env:GITHUB_ENV
+          & $exe --version
+
+      - name: Steps, each with a 20-minute limit and a capture when it stalls
+        shell: pwsh
+        run: |
+          function Capture($name) {
+            $dir = Join-Path $env:S "out\$name"
+            New-Item -ItemType Directory -Force $dir | Out-Null
+            $procs = Get-CimInstance Win32_Process
+            $procs | Select-Object ProcessId, ParentProcessId, Name, CreationDate, CommandLine | Format-List | Out-File "$dir\processes.txt" -Width 4000
+            $ours = $procs | Where-Object { $_.CommandLine -match 'scratch' -or $_.ExecutablePath -match 'scratch' }
+            $ours | Select-Object ProcessId, ParentProcessId, Name, CommandLine | Format-List | Out-File "$dir\our-processes.txt" -Width 4000
+            foreach ($p in $ours) {
+              Get-NetTCPConnection -OwningProcess $p.ProcessId -ErrorAction SilentlyContinue |
+                Select-Object OwningProcess, LocalAddress, LocalPort, RemoteAddress, RemotePort, State |
+                Format-Table -AutoSize | Out-File -Append "$dir\tcp.txt" -Width 400
+              $t = Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
+              if ($t) { "== $($p.ProcessId) $($p.Name) threads:" | Out-File -Append "$dir\threads.txt"; $t.Threads | Select-Object Id, ThreadState, WaitReason | Format-Table | Out-File -Append "$dir\threads.txt" -Width 400 }
+            }
+            foreach ($p in $ours) {
+              Get-NetTCPConnection -OwningProcess $p.ProcessId -ErrorAction SilentlyContinue | ForEach-Object {
+                try { "$($_.RemoteAddress) -> $([System.Net.Dns]::GetHostEntry($_.RemoteAddress).HostName)" } catch { "$($_.RemoteAddress) -> ?" }
+              } | Out-File -Append "$dir\hosts.txt"
+            }
+          }
+          function Step($name, [string[]]$argv) {
+            "::group::$name : $($argv -join ' ')"
+            $out = Join-Path $env:S "out\$name.log"
+            $start = Get-Date
+            $p = Start-Process -FilePath $env:EXE -ArgumentList $argv -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError "$out.err"
+            if (-not $p.WaitForExit(20 * 60 * 1000)) {
+              "STALLED after 20 minutes: $name"
+              Capture $name
+              Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'scratch' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+              "$name STALLED" | Out-File -Append (Join-Path $env:S 'out\summary.txt')
+            } else {
+              $secs = [int]((Get-Date) - $start).TotalSeconds
+              "$name exit $($p.ExitCode) after $secs s" | Out-File -Append (Join-Path $env:S 'out\summary.txt')
+            }
+            Get-Content $out, "$out.err" -ErrorAction SilentlyContinue | Select-Object -Last 40
+            "::endgroup::"
+          }
+          Step '01-versions' @('versions')
+          Step '02-java-list' @('java')
+          Step '03-install-latest' @('install', 'latest')
+          Step '04-prepare' @('prepare')
+          Step '05-install-dev' @('install', 'dev-2026-11-25-6a02076')
+          Step '06-prepare-dev' @('prepare', '--version', 'dev-2026-11-25-6a02076')
+          Step '07-prepare-download' @('prepare', '--download')
+          Get-Content (Join-Path $env:S 'out\summary.txt')
+
+      - name: Window: start it, capture after two minutes
+        if: always()
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath $env:EXE -PassThru
+          Start-Sleep 120
+          $dir = Join-Path $env:S 'out\window'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'scratch' } | Select-Object ProcessId, ParentProcessId, Name, CommandLine | Format-List | Out-File "$dir\our-processes.txt" -Width 4000
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("$dir\screen.png")
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+
+      - name: Logs
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse $env:S -Include *.log, *.txt, *.json -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch '\\app\\' -and $_.Length -lt 20MB } |
+            ForEach-Object { $rel = $_.FullName.Substring($env:S.Length + 1); $dst = Join-Path "$env:S\collected" $rel; New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null; Copy-Item $_.FullName $dst }
+          Copy-Item -Recurse "$env:S\out" "$env:S\collected\out-dir" -ErrorAction SilentlyContinue
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: preparing-hang-repro
+          path: ${{ runner.temp }}/scratch/collected
