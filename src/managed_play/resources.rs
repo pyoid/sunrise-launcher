@@ -139,11 +139,11 @@ impl Resources {
                     Ok(None)
                 }
                 Err(error) if stop.is_some_and(crate::native_mods::Cancellation::is_stopped) => {
-                    step.failed(error.to_string());
+                    step.failed(&error);
                     Err(error)
                 }
                 Err(error) => {
-                    step.failed(error.to_string());
+                    step.failed(&error);
                     crate::elog!("{error}");
                     Ok(None)
                 }
