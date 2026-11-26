@@ -25,7 +25,9 @@ impl Launcher {
             error: None,
             busy: false,
             pin: None,
-            channel: if self.stable_available() {
+            channel: if !self.profile_build_choices(Channel::Dev).is_empty() {
+                Channel::Dev
+            } else if self.stable_available() {
                 Channel::Stable
             } else {
                 Channel::Nightly
