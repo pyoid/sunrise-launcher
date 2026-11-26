@@ -20,21 +20,33 @@ use windows_sys::Win32::{
 /// An owned process object; neither waiting nor termination guesses ownership from a PID.
 pub struct WindowsChild(OwnedHandle, u32, Option<Arc<Job>>);
 
-/// Neither job permits breakaway. Only the compiler dies with its launcher. A wrapped game
+/// What a job is for, and so how its leader's exit is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum JobKind {
+    /// Dies with its launcher; the leader's exit is final only once the whole tree is proven gone.
+    Compiler,
+    /// A wrapped game: the leader's exit counts only when no member is left.
+    Wrapper,
+    /// A preparer: dies with its launcher, and the leader's exit is its end whatever it left
+    /// running (the launcher then terminates the job so none holds the preparer's pipes).
+    Preparer,
+}
+
+/// No job permits breakaway. The compiler and preparer die with their launcher. A wrapped game
 /// must survive the launcher after its confirmed handoff, like a directly started game.
 #[derive(Debug)]
-pub(crate) struct Job(OwnedHandle, bool);
+pub(crate) struct Job(OwnedHandle, JobKind);
 
 impl Job {
-    fn create(compiler: bool) -> io::Result<Self> {
+    fn create(kind: JobKind) -> io::Result<Self> {
         // SAFETY: no name or inherited security descriptor; the caller owns the returned handle.
         let handle = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
         if handle.is_null() {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: CreateJobObjectW returned an owned handle. Set a fixed-size, no-breakaway limit.
-        let job = Self(unsafe { OwnedHandle::from_raw_handle(handle) }, compiler);
-        if !compiler {
+        let job = Self(unsafe { OwnedHandle::from_raw_handle(handle) }, kind);
+        if kind == JobKind::Wrapper {
             return Ok(job);
         }
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
@@ -195,11 +207,17 @@ impl WindowsChild {
     }
 
     pub(crate) fn compiler_job(&self) -> Option<Arc<Job>> {
-        self.2.as_ref().filter(|job| job.1).cloned()
+        self.2
+            .as_ref()
+            .filter(|job| job.1 == JobKind::Compiler)
+            .cloned()
     }
 
     pub(crate) fn wrapper_job(&self) -> Option<Arc<Job>> {
-        self.2.as_ref().filter(|job| !job.1).cloned()
+        self.2
+            .as_ref()
+            .filter(|job| job.1 == JobKind::Wrapper)
+            .cloned()
     }
 
     pub(crate) fn wrapper_leader_exited(&self) -> io::Result<bool> {
@@ -217,9 +235,15 @@ impl WindowsChild {
         Ok(())
     }
 
+    /// Kills everything still in the process's job (a preparer's leftover children), so none
+    /// keeps its pipes open. Without a job there is nothing to do.
+    pub(crate) fn terminate_job(&self) -> io::Result<()> {
+        self.2.as_ref().map_or(Ok(()), |job| job.terminate())
+    }
+
     pub(crate) fn try_wait(&self) -> io::Result<Option<std::process::ExitStatus>> {
         let status = self.status(0)?;
-        if let Some(job) = self.2.as_ref().filter(|job| !job.1) {
+        if let Some(job) = self.2.as_ref().filter(|job| job.1 == JobKind::Wrapper) {
             if status.is_some() && job.accounting()?.ActiveProcesses != 0 {
                 return Ok(None);
             }
@@ -231,12 +255,14 @@ impl WindowsChild {
     pub fn wait(&self) -> io::Result<std::process::ExitStatus> {
         let status = self.status(INFINITE)?.ok_or(io::ErrorKind::TimedOut)?;
         if let Some(job) = &self.2 {
-            if job.1 {
-                job.check_finished(self.1)?;
-            } else {
-                while job.accounting()?.ActiveProcesses != 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+            match job.1 {
+                JobKind::Compiler => job.check_finished(self.1)?,
+                JobKind::Wrapper => {
+                    while job.accounting()?.ActiveProcesses != 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
                 }
+                JobKind::Preparer => {}
             }
         }
         Ok(status)
@@ -326,6 +352,7 @@ pub(super) struct Start<'a> {
     pub attached: bool,
     pub compiler: bool,
     pub wrapper: bool,
+    pub preparer: bool,
 }
 
 pub(super) fn spawn_exact(
@@ -352,10 +379,16 @@ pub(super) fn spawn_exact(
         argument(&mut line, &wide(arg)?);
     }
     line.push(0);
-    let job = (start.compiler || start.wrapper)
-        .then(|| Job::create(start.compiler))
-        .transpose()?
-        .map(Arc::new);
+    let kind = if start.compiler {
+        Some(JobKind::Compiler)
+    } else if start.wrapper {
+        Some(JobKind::Wrapper)
+    } else if start.preparer {
+        Some(JobKind::Preparer)
+    } else {
+        None
+    };
+    let job = kind.map(Job::create).transpose()?.map(Arc::new);
     let nul = File::options().read(true).write(true).open("NUL")?;
     let mut roots: Vec<_> = files.iter().map(|file| file.as_raw_handle()).collect();
     roots.sort_unstable_by_key(|h| *h as usize);

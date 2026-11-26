@@ -123,6 +123,15 @@ impl Child {
         }
     }
 
+    /// Kills what a Windows preparer left running in its job; nothing elsewhere.
+    pub fn terminate_job(&self) -> io::Result<()> {
+        match &self.process {
+            Handle::Std(_) | Handle::Relayed(_) => Ok(()),
+            #[cfg(windows)]
+            Handle::Windows(child) => child.terminate_job(),
+        }
+    }
+
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         match &mut self.process {
             Handle::Std(child) => child.try_wait(),
