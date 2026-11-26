@@ -141,7 +141,14 @@ impl Launcher {
     /// Closes the dialog; a sheet holding edits not saved asks first. A dialog that is saving
     /// stays.
     pub(super) fn close_instance_dialog(&mut self) {
-        let changed = self.sheet_changed();
+        // A new profile has nothing saved to compare with: what was typed or picked in it is
+        // the edit.
+        let typed = !self.servers.value(Field::InstanceName).trim().is_empty()
+            || !self.servers.value(Field::InstanceGroup).trim().is_empty();
+        let changed = self.sheet_changed()
+            || self.instances.dialog.as_ref().is_some_and(|d| {
+                d.editing.is_none() && (typed || d.icon.is_some() || d.picture.is_some())
+            });
         if let Some(d) = self.instances.dialog.as_mut().filter(|d| !d.busy) {
             if changed {
                 d.discarding = true;
