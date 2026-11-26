@@ -196,13 +196,9 @@ pub fn api(path: &str) -> Result<Option<serde_json::Value>, String> {
     match backend::get_unless_missing(&url) {
         Ok(Some(response)) => response.into_json().map(Some).map_err(|e| e.to_string()),
         Ok(None) => Ok(None),
-        Err(e) if e.contains("rate limit") => Err(RATE_LIMIT.into()),
         Err(e) => Err(e),
     }
 }
-
-const RATE_LIMIT: &str =
-    "GitHub's rate limit for anonymous requests was reached. Try again in a few minutes.";
 
 /// Percent-encodes a ref for a URL path, keeping its `/`.
 fn encode(r: &str) -> String {
