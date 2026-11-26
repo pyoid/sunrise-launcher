@@ -344,6 +344,8 @@ impl Launcher {
                         account::discard_launch_session(session_file);
                         continue;
                     }
+                    self.play_step = None;
+                    self.play_detail = None;
                     for notice in &registry_notices {
                         console_page::keep_line(
                             &mut self.prepare_log,

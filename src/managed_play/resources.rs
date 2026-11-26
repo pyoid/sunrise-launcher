@@ -248,21 +248,19 @@ impl Resources {
         }
         require_dir(root)?;
         launcher_log::play_detail(crate::i18n::tr("Sealing the game files"));
-        let seal_meter = || {
-            launcher_log::PlayMeter::new(|done, total| {
-                crate::i18n::trf(
-                    "Sealing the game files: {done} of {total}",
-                    &[("done", &done.to_string()), ("total", &total.to_string())],
-                )
-            })
-        };
-        let hash_meter = seal_meter();
-        let on_hash = |done, total| hash_meter.tick(done, total);
-        let primary = logged("Sealing game files: hashing", || {
+        // One monotonic count across hashing, copying and flushing so the count never restarts.
+        let seal_meter = launcher_log::PlayMeter::new(|done, total| {
+            crate::i18n::trf(
+                "Sealing the game files: {done} of {total}",
+                &[("done", &done.to_string()), ("total", &total.to_string())],
+            )
+        });
+        let on_hash = |done, total: usize| seal_meter.tick(done, total.saturating_mul(3));
+        let (primary, hashed_files) = logged("Sealing game files: hashing", || {
             Ok(
                 match artifact::tree_with_progress(source, true, workers, stop, Some(&on_hash))? {
-                    Some((digest, files)) => (Some(digest), files),
-                    None => (None, 0),
+                    Some((digest, files)) => ((Some(digest), files), files),
+                    None => ((None, 0), 0),
                 },
             )
         })?;
@@ -288,19 +286,32 @@ impl Resources {
                 .tempdir_in(root.join(".local"))
                 .map_err(|error| at(root, error))?;
             let candidate = stage.path().join("resources");
-            let copy_meter = seal_meter();
-            let on_copy = |done, total| copy_meter.tick(done, total);
+            let on_copy = |done, total: usize| {
+                seal_meter.tick(
+                    hashed_files.saturating_add(done),
+                    hashed_files.saturating_add(total.saturating_mul(2)),
+                )
+            };
             let copied = logged("Sealing game files: copying", || {
                 let copied =
                     copy_tree_with(source, &candidate, true, 0, workers, stop, Some(&on_copy))?;
                 let files = copied.files.len();
                 Ok((copied, files))
             })?;
-            let flush_meter = seal_meter();
-            let on_flush = |done, total| flush_meter.tick(done, total);
+            let copied_files = copied.files.len();
+            let on_flush = |done, total: usize| {
+                seal_meter.tick(
+                    hashed_files
+                        .saturating_add(copied_files)
+                        .saturating_add(done),
+                    hashed_files
+                        .saturating_add(copied_files)
+                        .saturating_add(total),
+                )
+            };
             logged("Sealing game files: flushing", || {
                 flush_copied(&copied, workers, stop, Some(&on_flush))?;
-                Ok(((), copied.files.len()))
+                Ok(((), copied_files))
             })?;
             let (from, to) = if exists {
                 (candidate.as_path(), &resources)

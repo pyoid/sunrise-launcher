@@ -179,30 +179,33 @@ pub fn line(text: impl AsRef<str>) {
 
 type PlayDetailSink = std::sync::Arc<dyn Fn(String) + Send + Sync>;
 
-thread_local! {
-    static PLAY_DETAIL: std::cell::RefCell<Option<PlayDetailSink>> =
-        const { std::cell::RefCell::new(None) };
-}
+static PLAY_DETAIL_NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static PLAY_DETAIL: Mutex<Option<(u64, PlayDetailSink)>> = Mutex::new(None);
 
-/// Keeps a Play progress sink installed on the current thread until dropped.
-pub struct PlayDetailGuard(Option<PlayDetailSink>);
+/// Keeps a Play progress sink installed across all threads until dropped.
+pub struct PlayDetailGuard {
+    id: u64,
+    prev: Option<(u64, PlayDetailSink)>,
+}
 
 impl Drop for PlayDetailGuard {
     fn drop(&mut self) {
-        PLAY_DETAIL.with(|cell| {
-            *cell.borrow_mut() = self.0.take();
-        });
+        let mut slot = lock(&PLAY_DETAIL);
+        if slot.as_ref().is_some_and(|(id, _)| *id == self.id) {
+            *slot = self.prev.take();
+        }
     }
 }
 
-/// Installs a sink that receives live Play step text on this thread.
+/// Installs a process-wide sink that receives live Play step text from any thread while the guard
+/// is alive.
 pub fn on_play_detail(sink: impl Fn(String) + Send + Sync + 'static) -> PlayDetailGuard {
-    let prev = PLAY_DETAIL.with(|cell| cell.borrow_mut().replace(std::sync::Arc::new(sink)));
-    PlayDetailGuard(prev)
+    let id = PLAY_DETAIL_NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let prev = lock(&PLAY_DETAIL).replace((id, std::sync::Arc::new(sink)));
+    PlayDetailGuard { id, prev }
 }
 
-/// Sends a Play step line to the window (when a sink is installed on this thread) and to
-/// `launcher.log`.
+/// Sends a Play step line to the window (when a sink is installed) and to `launcher.log`.
 pub fn play_detail(text: impl Into<String>) {
     let text = text.into();
     line(&text);
@@ -212,7 +215,7 @@ pub fn play_detail(text: impl Into<String>) {
 /// Sends a Play step line to the window without adding another `launcher.log` line.
 pub fn play_detail_ui_only(text: impl Into<String>) {
     let text = text.into();
-    let sink = PLAY_DETAIL.with(|cell| cell.borrow().clone());
+    let sink = lock(&PLAY_DETAIL).as_ref().map(|(_, sink)| sink.clone());
     if let Some(sink) = sink {
         sink(text);
     }
@@ -228,7 +231,7 @@ pub struct PlayMeter {
 
 impl PlayMeter {
     pub fn new(format: fn(usize, usize) -> String) -> Self {
-        let sink = PLAY_DETAIL.with(|cell| cell.borrow().clone());
+        let sink = lock(&PLAY_DETAIL).as_ref().map(|(_, sink)| sink.clone());
         Self {
             sink,
             format,
@@ -671,8 +674,11 @@ mod tests {
         assert!(!found[0].contains("Steve_Prepare"), "{found:?}");
     }
 
+    static DETAIL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn play_meter_reports_counted_steps_to_both_ui_and_log() {
+        let _serial = lock(&DETAIL_TEST_LOCK);
         let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
         let sink_seen = seen.clone();
         let before = since(0).0;
@@ -683,7 +689,11 @@ mod tests {
         meter.tick(1, 100);
         meter.tick(50, 100);
         meter.tick(100, 100);
-        let ui = lock(&seen).clone();
+        let ui: Vec<String> = lock(&seen)
+            .iter()
+            .filter(|l| l.starts_with("Sealing test files:"))
+            .cloned()
+            .collect();
         assert_eq!(
             ui,
             vec![
@@ -697,6 +707,39 @@ mod tests {
                 .iter()
                 .any(|l| l.contains("Sealing test files: 1 of 100")),
             "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn play_detail_from_spawned_thread_reaches_sink() {
+        let _serial = lock(&DETAIL_TEST_LOCK);
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink_seen = seen.clone();
+        let _guard = on_play_detail(move |text| {
+            lock(&sink_seen).push(text);
+        });
+        std::thread::spawn(|| {
+            play_detail_ui_only("spawned-thread-test: Downloading Minecraft's files: 12 of 400");
+            let meter = PlayMeter::new(|done, total| {
+                format!("spawned-thread-test: Sealing worker files: {done} of {total}")
+            });
+            meter.tick(1, 10);
+            meter.tick(10, 10);
+        })
+        .join()
+        .expect("worker thread joined");
+        let got: Vec<String> = lock(&seen)
+            .iter()
+            .filter(|l| l.starts_with("spawned-thread-test:"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                "spawned-thread-test: Downloading Minecraft's files: 12 of 400".to_string(),
+                "spawned-thread-test: Sealing worker files: 1 of 10".to_string(),
+                "spawned-thread-test: Sealing worker files: 10 of 10".to_string(),
+            ]
         );
     }
 }
