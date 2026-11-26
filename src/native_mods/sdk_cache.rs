@@ -374,6 +374,14 @@ pub(super) fn build_folder(commit: &str) -> PathBuf {
     root().join(commit)
 }
 
+/// The index [`index`] keeps for build `commit`, as it is on disk and unchecked: what the fast
+/// path keys a build on (`reuse`), never a reason to trust it. None when none is kept.
+pub(super) fn kept_index(commit: &str) -> Option<Vec<u8>> {
+    super::is_revision(commit)
+        .then(|| fs::read(build_folder(commit).join(INDEX)).ok())
+        .flatten()
+}
+
 /// Write `bytes` to `path` whole or not at all: beside it first, then renamed into place.
 pub(super) fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), Refusal> {
     let cache = |error: std::io::Error| Refusal::Cache(format!("{}: {error}", path.display()));

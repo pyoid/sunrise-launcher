@@ -98,10 +98,9 @@ fn tail(path: &Path, lines: usize) -> Option<String> {
     let mut bytes = Vec::new();
     file.take(LIMIT).read_to_end(&mut bytes).ok()?;
     let text = String::from_utf8_lossy(&bytes);
-    // A read that starts mid-file starts mid-line: drop that partial first line, unless it is
-    // all there is (one line longer than the read), where its end is still the latest output.
-    let text = match text.find('\n') {
-        Some(end) if skip > 0 => &text[end + 1..],
+    // Drop a potentially partial first line only if there is newer non-blank output.
+    let text = match text.split_once('\n') {
+        Some((_, rest)) if skip > 0 && !rest.trim().is_empty() => rest,
         _ => &text[..],
     };
     let kept: Vec<&str> = text

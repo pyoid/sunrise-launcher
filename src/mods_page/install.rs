@@ -23,8 +23,8 @@ mod batch;
 mod cards;
 mod requests;
 mod source_queue;
+pub(crate) use crate::eta::{stage_fraction, stage_label};
 use cards::{failure_line, notice_failure};
-pub(crate) use cards::{stage_fraction, stage_label};
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum SourcePicks {

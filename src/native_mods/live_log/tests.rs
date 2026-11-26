@@ -38,10 +38,12 @@ fn a_long_log_is_read_from_its_end_without_its_partial_first_line() {
 fn one_line_longer_than_the_read_still_shows_its_end() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("build.log");
-    fs::write(&log, format!("start\n{}end", "x".repeat(100_000))).unwrap();
-    let shown = tail(&log, 3).unwrap();
-    assert!(shown.ends_with("xend"));
-    assert_eq!(shown.len() as u64, LIMIT);
+    for ending in ["", "\n", "\r\n", "\n \t\n"] {
+        fs::write(&log, format!("start\n{}end{ending}", "x".repeat(100_000))).unwrap();
+        let shown = tail(&log, 3).expect("a long line should still show its end");
+        assert!(shown.ends_with("xend"));
+        assert_eq!(shown.len() as u64, LIMIT - ending.len() as u64);
+    }
 }
 
 #[test]
