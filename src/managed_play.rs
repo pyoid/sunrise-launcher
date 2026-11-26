@@ -6,6 +6,7 @@ mod client;
 mod first;
 mod game;
 mod inputs;
+mod pool;
 mod resources;
 mod roots;
 pub use client::{headless_first, Client, FailedBuild, ModRecovery, Progress, StartError, Started};
