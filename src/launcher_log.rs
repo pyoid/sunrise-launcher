@@ -177,6 +177,104 @@ pub fn line(text: impl AsRef<str>) {
     }
 }
 
+type PlayDetailSink = std::sync::Arc<dyn Fn(String) + Send + Sync>;
+
+thread_local! {
+    static PLAY_DETAIL: std::cell::RefCell<Option<PlayDetailSink>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Keeps a Play progress sink installed on the current thread until dropped.
+pub struct PlayDetailGuard(Option<PlayDetailSink>);
+
+impl Drop for PlayDetailGuard {
+    fn drop(&mut self) {
+        PLAY_DETAIL.with(|cell| {
+            *cell.borrow_mut() = self.0.take();
+        });
+    }
+}
+
+/// Installs a sink that receives live Play step text on this thread.
+pub fn on_play_detail(sink: impl Fn(String) + Send + Sync + 'static) -> PlayDetailGuard {
+    let prev = PLAY_DETAIL.with(|cell| cell.borrow_mut().replace(std::sync::Arc::new(sink)));
+    PlayDetailGuard(prev)
+}
+
+/// Sends a Play step line to the window (when a sink is installed on this thread) and to
+/// `launcher.log`.
+pub fn play_detail(text: impl Into<String>) {
+    let text = text.into();
+    line(&text);
+    play_detail_ui_only(text);
+}
+
+/// Sends a Play step line to the window without adding another `launcher.log` line.
+pub fn play_detail_ui_only(text: impl Into<String>) {
+    let text = text.into();
+    let sink = PLAY_DETAIL.with(|cell| cell.borrow().clone());
+    if let Some(sink) = sink {
+        sink(text);
+    }
+}
+
+/// Throttles per-file progress updates from parallel workers so the window updates every ~250 ms
+/// and `launcher.log` gets a line at most every ~2 s without flooding either.
+pub struct PlayMeter {
+    sink: Option<PlayDetailSink>,
+    format: fn(usize, usize) -> String,
+    state: Mutex<(Option<Instant>, Option<Instant>)>,
+}
+
+impl PlayMeter {
+    pub fn new(format: fn(usize, usize) -> String) -> Self {
+        let sink = PLAY_DETAIL.with(|cell| cell.borrow().clone());
+        Self {
+            sink,
+            format,
+            state: Mutex::new((None, None)),
+        }
+    }
+
+    pub fn tick(&self, done: usize, total: usize) {
+        if total == 0 {
+            return;
+        }
+        let now = Instant::now();
+        let (emit_ui, emit_log) = {
+            let mut guard = lock(&self.state);
+            let ui = self.sink.is_some()
+                && (done == 1
+                    || done >= total
+                    || guard.0.is_none_or(|t| {
+                        now.saturating_duration_since(t) >= Duration::from_millis(250)
+                    }));
+            let log = guard
+                .1
+                .is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_secs(2));
+            if ui {
+                guard.0 = Some(now);
+            }
+            if log {
+                guard.1 = Some(now);
+            }
+            (ui, log)
+        };
+        if !emit_ui && !emit_log {
+            return;
+        }
+        let text = (self.format)(done.min(total), total);
+        if emit_log {
+            line(&text);
+        }
+        if emit_ui {
+            if let Some(sink) = &self.sink {
+                sink(text);
+            }
+        }
+    }
+}
+
 /// A long step. Logs "{what}: started" now; `done` logs "{what}: done in {duration}{: detail}",
 /// `failed` logs "{what}: failed after {duration}: {why}", and a Step dropped without either
 /// logs "{what}: ended after {duration} with no result". Duration as "850 ms" under a second,
@@ -566,5 +664,34 @@ mod tests {
             .collect();
         assert_eq!(found.len(), 1, "{lines:?}");
         assert!(!found[0].contains("Steve_Prepare"), "{found:?}");
+    }
+
+    #[test]
+    fn play_meter_reports_counted_steps_to_both_ui_and_log() {
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink_seen = seen.clone();
+        let before = since(0).0;
+        let _guard = on_play_detail(move |text| {
+            lock(&sink_seen).push(text);
+        });
+        let meter = PlayMeter::new(|done, total| format!("Sealing test files: {done} of {total}"));
+        meter.tick(1, 100);
+        meter.tick(50, 100);
+        meter.tick(100, 100);
+        let ui = lock(&seen).clone();
+        assert_eq!(
+            ui,
+            vec![
+                "Sealing test files: 1 of 100".to_string(),
+                "Sealing test files: 100 of 100".to_string(),
+            ]
+        );
+        let (_, lines) = since(before);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Sealing test files: 1 of 100")),
+            "{lines:?}"
+        );
     }
 }

@@ -25,7 +25,19 @@ pub(super) fn run<T: Sync, S, R: Send>(
     init: impl Fn() -> S + Sync,
     job: impl Fn(&mut S, &T) -> Result<R, String> + Sync,
 ) -> Result<Vec<R>, String> {
+    run_with_progress(items, workers, stop, None, init, job)
+}
+
+pub(super) fn run_with_progress<T: Sync, S, R: Send>(
+    items: &[T],
+    workers: usize,
+    stop: Option<&Cancellation>,
+    on_done: Option<&(dyn Fn(usize, usize) + Sync)>,
+    init: impl Fn() -> S + Sync,
+    job: impl Fn(&mut S, &T) -> Result<R, String> + Sync,
+) -> Result<Vec<R>, String> {
     let cursor = AtomicUsize::new(0);
+    let completed = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
     let first = Mutex::new(None::<String>);
     let fail = |error: String| {
@@ -48,23 +60,34 @@ pub(super) fn run<T: Sync, S, R: Send>(
                 break;
             };
             match job(&mut state, item) {
-                Ok(result) => done.push((at, result)),
+                Ok(result) => {
+                    done.push((at, result));
+                    if let Some(on_done) = on_done {
+                        let n = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        on_done(n, items.len());
+                    }
+                }
                 Err(error) => fail(error),
             }
         }
         done
     };
     let finished = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..workers.clamp(1, items.len().max(1)))
-            .map(|_| {
-                scope.spawn(|| {
-                    catch_unwind(AssertUnwindSafe(&work)).unwrap_or_else(|_| {
-                        fail("a worker thread panicked".into());
-                        Vec::new()
-                    })
+        let mut handles = Vec::new();
+        for _ in 0..workers.clamp(1, items.len().max(1)) {
+            match std::thread::Builder::new().spawn_scoped(scope, || {
+                catch_unwind(AssertUnwindSafe(&work)).unwrap_or_else(|_| {
+                    fail("a worker thread panicked".into());
+                    Vec::new()
                 })
-            })
-            .collect();
+            }) {
+                Ok(handle) => handles.push(handle),
+                Err(error) => {
+                    fail(format!("could not start worker thread: {error}"));
+                    break;
+                }
+            }
+        }
         let mut finished = Vec::new();
         for handle in handles {
             match handle.join() {

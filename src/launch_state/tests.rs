@@ -69,9 +69,26 @@ fn play_names_the_step_it_is_at_while_the_game_starts() {
     // A step left over once the start is over says nothing.
     let done = Facts {
         step: Some(backend::PlayStep::Mods),
+        play_detail: Some("Sealing the game files: 10 of 20".into()),
         ..idle()
     };
     assert_eq!(done.view().main, Main::Play);
+    assert_eq!(done.view().said, None);
+
+    // Live counted detail shows beside/under "Preparing…" while Play is working.
+    let preparing = Facts {
+        starting: true,
+        step: Some(backend::PlayStep::Prepare),
+        play_detail: Some("Downloading Minecraft's files: 120 of 4000".into()),
+        ..idle()
+    };
+    let view = preparing.view();
+    assert_eq!(view.main.label(), "Preparing…");
+    assert_eq!(
+        view.said.as_deref(),
+        Some("Downloading Minecraft's files: 120 of 4000")
+    );
+    assert!(!view.failed);
 }
 
 #[test]

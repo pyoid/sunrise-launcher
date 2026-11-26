@@ -20,6 +20,8 @@ pub(crate) struct Facts {
     pub starting: bool,
     /// The step the start is at, once it has said (`Main::Step`).
     pub step: Option<backend::PlayStep>,
+    /// Live detail line shown beside/under "Preparing…" while Play is working.
+    pub play_detail: Option<String>,
     /// Mods are being added, removed or updated.
     pub mutating: bool,
     pub registry: Option<InstallProgress>,
@@ -274,10 +276,17 @@ impl Facts {
             .as_ref()
             .filter(|_| !busy && !self.running);
         let failed = (recovery.is_some() || brief.is_some()) && !self.building;
-        let said = recovery
-            .map(|_| tr("A mod install couldn't be finished.").into())
-            .or(brief)
-            .filter(|_| !self.building)
+        let active_detail = self
+            .play_detail
+            .clone()
+            .filter(|_| busy && !self.building && !failed);
+        let said = active_detail
+            .or_else(|| {
+                recovery
+                    .map(|_| tr("A mod install couldn't be finished.").into())
+                    .or(brief)
+                    .filter(|_| !self.building)
+            })
             .or_else(|| hold.clone())
             .or_else(|| update.map(|build| trf("{build} is available", &[("build", build)])));
         let way_out = match failed_at {
@@ -332,7 +341,7 @@ impl Main {
             Main::Step(backend::PlayStep::Assets) => tr("Checking game files…").into(),
             Main::Step(backend::PlayStep::Mods) => tr("Updating mods…").into(),
             Main::Step(backend::PlayStep::Download) => tr("Downloading the game…").into(),
-            Main::Step(backend::PlayStep::Prepare) => tr("Getting ready…").into(),
+            Main::Step(backend::PlayStep::Prepare) => tr("Preparing…").into(),
             Main::Step(backend::PlayStep::Native) => tr("Building mods…").into(),
             Main::Step(backend::PlayStep::SignIn) => tr("Signing in…").into(),
             Main::ChangingMods => tr("Changing mods…").into(),
@@ -458,6 +467,7 @@ impl Launcher {
             building: self.native_step.is_some(),
             starting: self.starting_client.is_some() || self.play_admission.is_some(),
             step: self.play_step,
+            play_detail: self.play_detail.clone(),
             mutating: self.mutating() || self.switch_busy(),
             registry: self.registry_stage(),
             registry_accepts_play: self.registry_accepts_play(),

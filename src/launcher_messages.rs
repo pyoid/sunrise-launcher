@@ -146,6 +146,9 @@ impl Launcher {
                 Msg::PlayStep(step) => {
                     if self.starting_client.is_some() {
                         self.play_step = Some(step);
+                        if matches!(step, backend::PlayStep::SignIn | backend::PlayStep::Native) {
+                            self.play_detail = None;
+                        }
                     }
                     if step == backend::PlayStep::SignIn && self.native_step.take().is_some() {
                         self.native_progress = None;
@@ -156,6 +159,11 @@ impl Launcher {
                             self.close_sheet();
                         }
                         self.refresh_installed();
+                    }
+                }
+                Msg::PlayDetail(detail) => {
+                    if self.starting_client.is_some() || self.preparing {
+                        self.play_detail = Some(detail);
                     }
                 }
                 Msg::ManagedBuild {
@@ -232,6 +240,7 @@ impl Launcher {
                     }
                     self.starting_client = None;
                     self.play_step = None;
+                    self.play_detail = None;
                     self.accounts = Accounts::load();
                     self.load_auth_statuses(false);
                     match *result {
@@ -594,6 +603,7 @@ impl Launcher {
                     match job {
                         Job::Prepare => {
                             self.preparing = false;
+                            self.play_detail = None;
                             self.refresh_open_storage_builds();
                             // Play pressed before the version was prepared plays now.
                             if let Some((tag, intent)) = self.play_when_prepared.take() {

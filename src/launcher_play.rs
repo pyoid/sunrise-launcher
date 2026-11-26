@@ -350,10 +350,17 @@ impl Launcher {
         self.play_pressed = Some(Instant::now());
         self.starting_client = Some(target.clone().unwrap_or_default());
         self.play_step = Some(backend::PlayStep::Assets);
+        self.play_detail = None;
         let cancellation = native_mods::Cancellation::default();
         self.native_cancellation = Some(cancellation.clone());
         let tx = self.tx.clone();
         std::thread::spawn(move || {
+            let _detail = sunrise_launcher::launcher_log::on_play_detail({
+                let tx = tx.clone();
+                move |text| {
+                    let _ = tx.send(Msg::PlayDetail(text));
+                }
+            });
             // Download progress arrives many times; each step is said once, when it begins.
             let announced = std::cell::Cell::new(None);
             let announce = |step: backend::PlayStep, what: &str| {
@@ -464,6 +471,7 @@ impl Launcher {
         // session arrives.
         self.starting_client = Some(tag.clone());
         self.play_step = None;
+        self.play_detail = None;
         let accepted = intent.account.clone();
         self.play_pressed = Some(Instant::now());
         let tx = self.tx.clone();
