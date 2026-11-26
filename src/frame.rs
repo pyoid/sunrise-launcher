@@ -7,6 +7,7 @@ use gpui::{rgb, AnimationExt};
 
 mod controls;
 mod header;
+mod logs;
 mod page;
 mod play;
 mod scrolls;
@@ -254,6 +255,11 @@ impl Launcher {
             .text_size(px(tokens::BODY))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
                 let k = &ev.keystroke;
+                if k.key == "escape" && this.close_logs() {
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 let command = if cfg!(target_os = "macos") {
                     k.modifiers.platform
                 } else {
@@ -334,6 +340,7 @@ impl Launcher {
         let top = self.modal(layers.pop(), window, cx);
         frame = frame.children(layers).children(top);
         frame = frame.children(self.viewer(window, cx));
+        frame = frame.children(self.logs_layer(window, cx));
         frame = frame.children(self.toast_float(titlebar_h));
         self.pictures.free_retired(window);
         let scenery = self

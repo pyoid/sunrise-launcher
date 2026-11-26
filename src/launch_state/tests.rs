@@ -69,9 +69,48 @@ fn play_names_the_step_it_is_at_while_the_game_starts() {
     // A step left over once the start is over says nothing.
     let done = Facts {
         step: Some(backend::PlayStep::Mods),
+        play_detail: Some("Sealing the game files: 10 of 20".into()),
         ..idle()
     };
     assert_eq!(done.view().main, Main::Play);
+    assert_eq!(done.view().play_detail, None);
+
+    // Live counted detail shows in the reserved play_detail slot (not `said`) while Play is working.
+    let preparing = Facts {
+        starting: true,
+        step: Some(backend::PlayStep::Prepare),
+        play_detail: Some("Downloading Minecraft's files: 120 of 4000".into()),
+        ..idle()
+    };
+    let view = preparing.view();
+    assert_eq!(view.main.label(), "Preparing…");
+    assert_eq!(view.said, None);
+    assert_eq!(
+        view.play_detail.as_deref(),
+        Some("Downloading Minecraft's files: 120 of 4000")
+    );
+    assert!(!view.failed);
+
+    // After a failed Play, a cancel (idle), or once the game is running, no stale detail remains.
+    let failed = Facts {
+        client_error: Some("Prepare failed".into()),
+        play_detail: Some("Sealing the game files: 10 of 20".into()),
+        ..idle()
+    };
+    let failed_view = failed.view();
+    assert!(failed_view.failed);
+    assert_eq!(
+        failed_view.said.as_deref(),
+        Some("The game couldn't start.")
+    );
+    assert_eq!(failed_view.play_detail, None);
+
+    let running = Facts {
+        running: true,
+        play_detail: Some("Checking the game files: 10 of 20".into()),
+        ..idle()
+    };
+    assert_eq!(running.view().play_detail, None);
 }
 
 #[test]

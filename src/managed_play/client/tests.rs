@@ -904,3 +904,36 @@ fn windows_bound_x64_fallback_survives_pending_retry_and_committed_replay() {
     );
     assert_eq!(reopened.active().unwrap(), Some(active));
 }
+
+#[test]
+fn cli_play_prepare_and_meter_lines_land_in_launcher_log_without_ui_sink() {
+    let player = "44106932-92fd-4771-92e8-3fe11b5a04ec";
+    let progress = format!("Downloading Minecraft's files: 5 of 40 for {player}");
+    let before = crate::game_log::launcher::since(0).0;
+    let seen = std::cell::RefCell::new(Vec::new());
+    emit_prepare_line(
+        &|p| {
+            if let Progress::Line(line) = p {
+                seen.borrow_mut().push(line);
+            }
+        },
+        progress.clone(),
+    );
+    let meter =
+        crate::game_log::launcher::PlayMeter::new(|d, t| format!("Checking cli files: {d} of {t}"));
+    meter.tick(1, 50);
+    assert_eq!(seen.into_inner(), vec![progress]);
+    let (_, lines) = crate::game_log::launcher::since(before);
+    let prep: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains("Preparing: Downloading Minecraft's files: 5 of 40"))
+        .collect();
+    assert_eq!(prep.len(), 1, "{lines:?}");
+    assert!(!prep[0].contains(player), "{prep:?}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("Checking cli files: 1 of 50")),
+        "{lines:?}"
+    );
+}

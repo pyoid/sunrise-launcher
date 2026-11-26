@@ -110,6 +110,8 @@ pub enum SignInError {
     NoProfile,
     /// The Microsoft account now has another Minecraft profile than the one signed in.
     OtherProfile,
+    /// The provider could not be reached or is temporarily unavailable.
+    Unavailable(String),
     Other(String),
 }
 
@@ -122,7 +124,7 @@ impl std::fmt::Display for SignInError {
             Self::DoesNotOwn => DOES_NOT_OWN,
             Self::NoProfile => NO_PROFILE,
             Self::OtherProfile => OTHER_PROFILE,
-            Self::Other(message) => message,
+            Self::Unavailable(message) | Self::Other(message) => message,
         })
     }
 }
@@ -171,7 +173,14 @@ pub(super) fn send(
     request: ureq::Request,
     body: Option<Body>,
     service: &str,
-) -> Result<(u16, Value), String> {
+) -> Result<(u16, Value), SignInError> {
+    let started = std::time::Instant::now();
+    let method = request.method().to_owned();
+    let url = url::Url::parse(request.url()).ok();
+    let host = url
+        .as_ref()
+        .and_then(url::Url::host_str)
+        .unwrap_or("unknown host");
     let result = match body {
         None => request.call(),
         Some(Body::Form(fields)) => request.send_form(&fields),
@@ -181,14 +190,49 @@ pub(super) fn send(
         Ok(r) => r,
         Err(ureq::Error::Status(_, r)) => r,
         Err(ureq::Error::Transport(_)) => {
-            return Err(format!(
-                "Could not reach {service}. Check your internet connection."
+            crate::game_log::launcher::line(format!(
+                "{service}: {method} {host} -> could not connect ({} ms)",
+                started.elapsed().as_millis()
             ));
+            return Err(SignInError::Unavailable(format!(
+                "Could not reach {service}. Check your internet connection."
+            )));
         }
     };
     let status = response.status();
     let text = response.into_string().unwrap_or_default();
-    Ok((status, serde_json::from_str(&text).unwrap_or(Value::Null)))
+    let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let answer = match (status, value.get("error").and_then(Value::as_str)) {
+        (400, Some("authorization_pending")) => "waiting for sign-in".to_owned(),
+        (400, Some("slow_down")) => "waiting; polling more slowly".to_owned(),
+        _ => status.to_string(),
+    };
+    crate::game_log::launcher::line(format!(
+        "{service}: {method} {host} -> {answer} ({} ms)",
+        started.elapsed().as_millis()
+    ));
+    Ok((status, value))
+}
+
+/// Mark the stage without putting a request, response body or account identifier in the log.
+fn staged<T>(stage: &str, run: impl FnOnce() -> Result<T, SignInError>) -> Result<T, SignInError> {
+    let step = crate::game_log::launcher::step(format!("Sign-in: {stage}"));
+    let result = run();
+    if result.is_ok() {
+        step.done("");
+    } else {
+        step.failed("services did not complete this stage");
+    }
+    result
+}
+
+fn available(status: u16, service: &str) -> Result<(), SignInError> {
+    if matches!(status, 429 | 500..=599) {
+        return Err(SignInError::Unavailable(format!(
+            "Could not reach {service}. Check your internet connection."
+        )));
+    }
+    Ok(())
 }
 
 pub(super) enum Body<'a> {
@@ -354,10 +398,13 @@ fn refresh_ms(ep: &Endpoints, client_id: &str, refresh: &str) -> Result<MsTokens
         ])),
         "Microsoft",
     )?;
+    available(status, "Microsoft")?;
     // A refresh token issued to another app registration (the launcher's client ID changed
     // since the player signed in) is refused as the client's; only a new sign-in mends it.
-    match v.get("error").and_then(Value::as_str) {
-        Some("invalid_client" | "unauthorized_client") => Err(SignInError::SignInAgain),
+    match (status, v.get("error").and_then(Value::as_str)) {
+        (400..=403, _) | (_, Some("invalid_client" | "unauthorized_client")) => {
+            Err(SignInError::SignInAgain)
+        }
         _ => ms_tokens(status, &v),
     }
 }
@@ -394,44 +441,58 @@ fn minecraft_login(
     progress: &dyn Fn(session::Phase),
 ) -> Result<Minecraft, SignInError> {
     progress(session::Phase::Xbox);
-    let (status, xbl) = send(
-        request_to("POST", &ep.xbox_user)?,
-        Some(Body::Json(json!({
-            "Properties": {
-                "AuthMethod": "RPS",
-                "SiteName": "user.auth.xboxlive.com",
-                "RpsTicket": format!("d={ms_access}"),
-            },
-            "RelyingParty": "http://auth.xboxlive.com",
-            "TokenType": "JWT",
-        }))),
-        "Xbox Live",
-    )?;
-    let xbl_token = str_field(&xbl, "Token")
-        .filter(|_| status == 200)
-        .ok_or("Xbox Live refused the sign-in.")?;
-    let (status, xsts) = send(
-        request_to("POST", &ep.xsts)?,
-        Some(Body::Json(json!({
-            "Properties": { "SandboxId": "RETAIL", "UserTokens": [xbl_token] },
-            "RelyingParty": "rp://api.minecraftservices.com/",
-            "TokenType": "JWT",
-        }))),
-        "Xbox Live",
-    )?;
-    if let Some(code) = xsts.get("XErr").and_then(Value::as_u64) {
-        return Err(xsts_error(code).into());
-    }
-    let claims = xsts.pointer("/DisplayClaims/xui/0");
-    let (Some(xsts_token), Some(uhs)) = (
-        str_field(&xsts, "Token").filter(|_| status == 200),
-        claims.and_then(|c| str_field(c, "uhs")),
-    ) else {
-        return Err("Xbox Live refused the sign-in.".into());
-    };
-    let xuid = claims.and_then(|c| str_field(c, "xid"));
+    let xbl_token = staged("Xbox Live user authentication", || {
+        let (status, xbl) = send(
+            request_to("POST", &ep.xbox_user)?,
+            Some(Body::Json(json!({
+                "Properties": {
+                    "AuthMethod": "RPS",
+                    "SiteName": "user.auth.xboxlive.com",
+                    "RpsTicket": format!("d={ms_access}"),
+                },
+                "RelyingParty": "http://auth.xboxlive.com",
+                "TokenType": "JWT",
+            }))),
+            "Xbox Live",
+        )?;
+        available(status, "Xbox Live")?;
+        if matches!(status, 401 | 403) {
+            return Err(SignInError::SignInAgain);
+        }
+        str_field(&xbl, "Token")
+            .filter(|_| status == 200)
+            .ok_or_else(|| "Xbox Live refused the sign-in.".into())
+    })?;
+    let (xsts_token, uhs, xuid) = staged("XSTS authorization", || {
+        let (status, xsts) = send(
+            request_to("POST", &ep.xsts)?,
+            Some(Body::Json(json!({
+                "Properties": { "SandboxId": "RETAIL", "UserTokens": [xbl_token] },
+                "RelyingParty": "rp://api.minecraftservices.com/",
+                "TokenType": "JWT",
+            }))),
+            "Xbox Live",
+        )?;
+        available(status, "Xbox Live")?;
+        if let Some(code) = xsts.get("XErr").and_then(Value::as_u64) {
+            return Err(xsts_error(code).into());
+        }
+        if matches!(status, 401 | 403) {
+            return Err(SignInError::SignInAgain);
+        }
+        let claims = xsts.pointer("/DisplayClaims/xui/0");
+        let (Some(xsts_token), Some(uhs)) = (
+            str_field(&xsts, "Token").filter(|_| status == 200),
+            claims.and_then(|c| str_field(c, "uhs")),
+        ) else {
+            return Err("Xbox Live refused the sign-in.".into());
+        };
+        Ok((xsts_token, uhs, claims.and_then(|c| str_field(c, "xid"))))
+    })?;
     progress(session::Phase::Minecraft);
-    let (token, expires_in) = minecraft_token(ep, &format!("XBL3.0 x={uhs};{xsts_token}"))?;
+    let (token, expires_in) = staged("Minecraft login", || {
+        minecraft_token(ep, &format!("XBL3.0 x={uhs};{xsts_token}"))
+    })?;
     Ok(Minecraft {
         token,
         expires_at: now().saturating_add(expires_in.min(7 * 86_400)),
@@ -454,7 +515,7 @@ fn minecraft_token(ep: &Endpoints, xtoken: &str) -> Result<(String, u64), SignIn
         "the Minecraft services",
     );
     if let Ok((200, v)) = &launcher {
-        if let Some(token) = str_field(v, "access_token") {
+        if let Some(token) = str_field(v, "access_token").filter(|t| !t.is_empty()) {
             return Ok((token, lifetime(v)));
         }
     }
@@ -466,8 +527,10 @@ fn minecraft_token(ep: &Endpoints, xtoken: &str) -> Result<(String, u64), SignIn
         Some(Body::Json(json!({ "identityToken": xtoken }))),
         "the Minecraft services",
     )?;
+    available(status, "the Minecraft services")?;
     match (status, str_field(&mc, "access_token")) {
-        (200, Some(token)) => Ok((token, lifetime(&mc))),
+        (200, Some(token)) if !token.is_empty() => Ok((token, lifetime(&mc))),
+        (401, _) => Err(SignInError::SignInAgain),
         // New Azure apps are refused until Mojang approves them (Minecraft API access).
         (403, _) => Err(
             "The Minecraft services refused this launcher: its app is not approved by Mojang yet."
@@ -492,6 +555,10 @@ fn owns_game(ep: &Endpoints, token: &str) -> Result<bool, SignInError> {
         None,
         "the Minecraft services",
     )?;
+    available(status, "the Minecraft services")?;
+    if matches!(status, 401 | 403) {
+        return Err(SignInError::SignInAgain);
+    }
     if status != 200 {
         return Err("Could not check which games this account owns.".into());
     }
@@ -530,12 +597,18 @@ fn profile(ep: &Endpoints, token: &str) -> Result<Option<Account>, SignInError> 
         None,
         "the Minecraft services",
     )?;
+    available(status, "the Minecraft services")?;
     if status == 404 {
         return Ok(None);
     }
-    let (Some(uuid), Some(name)) = (str_field(&v, "id"), str_field(&v, "name")) else {
+    if matches!(status, 401 | 403) {
+        return Err(SignInError::SignInAgain);
+    }
+    let (200, Some(uuid), Some(name)) = (status, str_field(&v, "id"), str_field(&v, "name")) else {
         return Err("Could not read the Minecraft profile.".into());
     };
+    crate::game_log::launcher::hide(&name);
+    crate::game_log::launcher::hide(&uuid);
     let active = |key: &str| {
         v.get(key)
             .and_then(Value::as_array)
@@ -597,11 +670,13 @@ pub fn finish_sign_in_with_progress(
 ) -> Result<(Account, Secrets), SignInError> {
     let mc = minecraft_login(ep, &ms.access, progress)?;
     progress(session::Phase::Ownership);
-    if !owns_game(ep, &mc.token)? {
+    if !staged("checking Minecraft ownership", || owns_game(ep, &mc.token))? {
         return Err(SignInError::DoesNotOwn);
     }
     progress(session::Phase::Profile);
-    let account = profile(ep, &mc.token)?.ok_or(SignInError::NoProfile)?;
+    let account = staged("reading the Minecraft profile", || {
+        profile(ep, &mc.token)?.ok_or(SignInError::NoProfile)
+    })?;
     Ok((account, Secrets::new(ms.refresh, mc)))
 }
 
@@ -650,11 +725,14 @@ pub(super) fn check_with(
     if secrets.sign_in_required {
         return Check::NoAnswer(SignInError::SignInAgain, secrets);
     }
+    let mut previous = None;
     if force || secrets.minecraft_expires_at <= now() + RENEW_BEFORE {
         progress(session::Phase::Microsoft);
-        let renewed = client_id
-            .ok_or(SignInError::NotConfigured)
-            .and_then(|id| refresh_ms(ep, id, &secrets.refresh_token));
+        let renewed = client_id.ok_or(SignInError::NotConfigured).and_then(|id| {
+            staged("renewing the Microsoft sign-in", || {
+                refresh_ms(ep, id, &secrets.refresh_token)
+            })
+        });
         let ms = match renewed {
             Ok(ms) => ms,
             Err(e) => {
@@ -666,12 +744,16 @@ pub(super) fn check_with(
         secrets.refresh_token = ms.refresh;
         match minecraft_login(ep, &ms.access, progress) {
             Ok(mc) => {
-                secrets = Secrets {
+                let refreshed = Secrets {
                     owns: secrets.owns,
-                    ..Secrets::new(secrets.refresh_token, mc)
-                }
+                    ..Secrets::new(secrets.refresh_token.clone(), mc)
+                };
+                previous = Some(std::mem::replace(&mut secrets, refreshed));
             }
-            Err(e) => return Check::NoAnswer(e, secrets),
+            Err(e) => {
+                secrets.sign_in_required = matches!(e, SignInError::SignInAgain);
+                return Check::NoAnswer(e, secrets);
+            }
         }
     }
     let token = &secrets.minecraft_token;
@@ -683,7 +765,13 @@ pub(super) fn check_with(
         progress(session::Phase::Profile);
         profile(ep, token)
     }) {
-        Err(e) => Check::NoAnswer(e, secrets),
+        Err(e) => {
+            // Keep the rotated Microsoft refresh credential, not a new Minecraft token
+            // we could not match to the signed-in profile.
+            let mut secrets = previous.unwrap_or(secrets);
+            secrets.sign_in_required = matches!(e, SignInError::SignInAgain);
+            Check::NoAnswer(e, secrets)
+        }
         Ok(None) => Check::DoesNot(Secrets {
             owns: false,
             ..secrets

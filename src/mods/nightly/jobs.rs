@@ -370,7 +370,7 @@ impl Launcher {
                 checked.target = Some(target);
             }
             for (id, error) in &checked.issues {
-                eprintln!("Nightly source update preflight ({id}): {error}");
+                sunrise_launcher::elog!("Nightly source update preflight ({id}): {error}");
             }
             let _ = tx.send(super::super::Event::Nightly(Event::Catalogue(catalogue)));
             let _ = tx.send(super::super::Event::Nightly(Event::Updates(Box::new(

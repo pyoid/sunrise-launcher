@@ -174,13 +174,15 @@ pub fn list(home: &Path) -> Vec<World> {
         .flatten()
         .filter_map(|e| scanned_world(&e.path()).ok().flatten())
         .collect();
-    // Worlds played at the same moment go by folder name, not by the order the disk lists them.
-    worlds.sort_by(|a, b| {
-        b.played
-            .cmp(&a.played)
-            .then_with(|| a.world.folder.cmp(&b.world.folder))
-    });
-    worlds.into_iter().map(|s| s.world).collect()
+    worlds.sort_by(|a, b| (b.played, &a.world.folder).cmp(&(a.played, &b.world.folder)));
+    worlds
+        .into_iter()
+        .map(|s| {
+            crate::game_log::launcher::hide(&s.world.folder);
+            crate::game_log::launcher::hide(&s.world.name);
+            s.world
+        })
+        .collect()
 }
 
 /// Whether `folder` has a level.dat file the game's reader can read (no recovery from level.dat_old).

@@ -1,9 +1,16 @@
 //! Exact identity of an installed executable and the files it reads beside itself.
 use super::{digest_file, plain_file, require_dir, unsettled, validate_tag};
-use crate::{backend, native_mods::sdk_cache::GameSlices};
+use crate::{
+    backend,
+    native_mods::{sdk_cache::GameSlices, Cancellation},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{fs, io, path::Path};
+use std::{
+    fs,
+    io::{self, Read as _},
+    path::{Path, PathBuf},
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -203,32 +210,78 @@ fn receipt<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, Str
 }
 
 pub(super) fn tree(path: &Path, resources: bool) -> Result<Option<[u8; 32]>, String> {
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() && plain_file(&meta) => {
-            let device = {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::MetadataExt;
-                    meta.dev()
-                }
-                #[cfg(not(unix))]
-                {
-                    0
-                }
-            };
-            directory(path, 0, device, resources).map(Some)
-        }
-        Ok(_) => Err(at(path, io::ErrorKind::InvalidData.into())),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(at(path, e)),
-    }
+    Ok(tree_with_workers(path, resources, super::pool::workers(), None)?.map(|(digest, _)| digest))
 }
 
-fn directory(path: &Path, depth: usize, _device: u64, resources: bool) -> Result<[u8; 32], String> {
+/// What a directory holds, in the order its digest folds it: files by the index of their
+/// own digest in the list the workers hash.
+enum Node {
+    Dir(Vec<(std::ffi::OsString, Node)>),
+    File(usize),
+}
+
+/// [`tree`] on `workers` threads, with the number of files it hashed. The walk and the fold
+/// run in the one fixed order of the serial digest; only the file hashes run in parallel.
+pub(super) fn tree_with_workers(
+    path: &Path,
+    resources: bool,
+    workers: usize,
+    stop: Option<&Cancellation>,
+) -> Result<Option<([u8; 32], usize)>, super::pool::Error> {
+    tree_with_progress(path, resources, workers, stop, None)
+}
+
+pub(super) fn tree_with_progress(
+    path: &Path,
+    resources: bool,
+    workers: usize,
+    stop: Option<&Cancellation>,
+    on_done: Option<&(dyn Fn(usize, usize) + Sync)>,
+) -> Result<Option<([u8; 32], usize)>, super::pool::Error> {
+    let device = match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() && plain_file(&meta) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                meta.dev()
+            }
+            #[cfg(not(unix))]
+            {
+                0
+            }
+        }
+        Ok(_) => return Err(file_error(path, io::ErrorKind::InvalidData.into())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(file_error(path, e)),
+    };
+    let mut files = Vec::new();
+    let root = directory(path, 0, device, resources, stop, &mut files)?;
+    let digests = super::pool::run_with_progress(
+        &files,
+        workers,
+        stop,
+        on_done,
+        || vec![0u8; 64 * 1024],
+        |buffer, file| digest_open(file, buffer),
+    )?;
+    Ok(Some((fold(&root, &digests), files.len())))
+}
+
+fn directory(
+    path: &Path,
+    depth: usize,
+    _device: u64,
+    resources: bool,
+    stop: Option<&Cancellation>,
+    files: &mut Vec<PathBuf>,
+) -> Result<Vec<(std::ffi::OsString, Node)>, super::pool::Error> {
     if depth > 64 {
-        return Err(at(path, io::ErrorKind::InvalidData.into()));
+        return Err(file_error(path, io::ErrorKind::InvalidData.into()));
     }
-    let mut hash = Sha256::new();
+    if let Some(stop) = stop {
+        stop.check()?;
+    }
+    let mut nodes = Vec::new();
     for entry in entries(path)? {
         let name = entry.file_name();
         if depth == 0 && resources && super::resources::generated_cache(&name) {
@@ -237,31 +290,76 @@ fn directory(path: &Path, depth: usize, _device: u64, resources: bool) -> Result
         let entry_path = entry.path();
         let meta = fs::symlink_metadata(&entry_path).map_err(|e| at(&entry_path, e))?;
         if !plain_file(&meta) {
-            return Err(at(&entry_path, io::ErrorKind::InvalidData.into()));
+            return Err(file_error(&entry_path, io::ErrorKind::InvalidData.into()));
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
             if _device != meta.dev() {
-                return Err(at(&entry_path, io::ErrorKind::InvalidData.into()));
+                return Err(file_error(&entry_path, io::ErrorKind::InvalidData.into()));
             }
         }
-        let image = if meta.is_dir() {
-            hash.update(b"d");
-            Some(directory(&entry_path, depth + 1, _device, resources)?)
+        let node = if meta.is_dir() {
+            Node::Dir(directory(
+                &entry_path,
+                depth + 1,
+                _device,
+                resources,
+                stop,
+                files,
+            )?)
         } else if meta.is_file() {
-            hash.update(b"f");
-            let image = digest_file(&entry_path)?;
-            if image.is_none() {
-                return Err(at(&entry_path, io::ErrorKind::NotFound.into()));
-            }
-            image
+            files.push(entry_path);
+            Node::File(files.len() - 1)
         } else {
-            return Err(at(&entry_path, io::ErrorKind::InvalidData.into()));
+            return Err(file_error(&entry_path, io::ErrorKind::InvalidData.into()));
         };
-        item(&mut hash, name.as_encoded_bytes(), image);
+        nodes.push((name, node));
+    }
+    Ok(nodes)
+}
+
+/// Hash one file through the handle it was opened as. The walk already refused links with
+/// `symlink_metadata`; recheck the path at open time and check the opened file type.
+fn digest_open(path: &Path, buffer: &mut [u8]) -> Result<[u8; 32], super::pool::Error> {
+    let mut file = super::open_if_file(path)?
+        .ok_or_else(|| file_error(path, io::ErrorKind::NotFound.into()))?;
+    let meta = file.metadata().map_err(|e| file_error(path, e))?;
+    if !meta.is_file() || !plain_file(&meta) {
+        return Err(file_error(path, io::ErrorKind::InvalidData.into()));
+    }
+    let mut hash = Sha256::new();
+    loop {
+        match file.read(buffer) {
+            Ok(0) => break,
+            Ok(n) => hash.update(&buffer[..n]),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(file_error(path, e)),
+        }
     }
     Ok(hash.finalize().into())
+}
+
+fn file_error(path: &Path, error: io::Error) -> super::pool::Error {
+    super::pool::Error::File(path.to_owned(), error)
+}
+
+fn fold(nodes: &[(std::ffi::OsString, Node)], digests: &[[u8; 32]]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    for (name, node) in nodes {
+        let image = match node {
+            Node::Dir(children) => {
+                hash.update(b"d");
+                fold(children, digests)
+            }
+            Node::File(index) => {
+                hash.update(b"f");
+                digests[*index]
+            }
+        };
+        item(&mut hash, name.as_encoded_bytes(), Some(image));
+    }
+    hash.finalize().into()
 }
 
 fn entries(path: &Path) -> Result<Vec<fs::DirEntry>, String> {
@@ -288,37 +386,4 @@ fn at(path: &Path, error: io::Error) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn image_covers_library_native_payload_and_architecture_but_not_logs() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path();
-        fs::write(dir.join(backend::CLIENT), b"game").unwrap();
-        fs::write(dir.join(".installed"), []).unwrap();
-        fs::create_dir(dir.join("native-data")).unwrap();
-        fs::create_dir_all(dir.join("deps/nested")).unwrap();
-        let paths = [
-            "native.dll",
-            "deps/nested/libsdk.so",
-            "native-data/data.json",
-            backend::GAME_BUILD_ARCHITECTURE,
-        ];
-        for path in paths {
-            fs::write(dir.join(path), b"original").unwrap();
-        }
-        let capture = || Artifact::capture_at("tag", dir).unwrap();
-        let sealed = capture();
-        fs::write(dir.join("latest.log"), b"mutable game log").unwrap();
-        assert_eq!(sealed, capture());
-        for path in paths {
-            fs::write(dir.join(path), b"different").unwrap();
-            assert_ne!(sealed, capture(), "{path}");
-            fs::write(dir.join(path), b"original").unwrap();
-            assert_eq!(sealed, capture(), "{path}");
-        }
-        fs::write(dir.join("extra.so.1"), b"extra library").unwrap();
-        assert_ne!(sealed, capture());
-    }
-}
+mod tests;

@@ -509,7 +509,7 @@ fn install_selected_release(
     let before = installed();
     let outcome = install(release)?;
     if let Some(warning) = outcome.receipt_warning() {
-        eprintln!("{warning}");
+        crate::elog!("{warning}");
     }
     if matches!(outcome, InstallOutcome::ReceiptOnly(_)) {
         return Ok(release.tag.clone());
@@ -523,7 +523,7 @@ fn install_selected_release(
     }
     if let Some(releases) = catalog {
         for (tag, error) in version_storage::prune_old_versions(releases, &release.tag) {
-            eprintln!("Could not remove old game build {tag}: {error}");
+            crate::elog!("Could not remove old game build {tag}: {error}");
         }
     }
     Ok(release.tag.clone())

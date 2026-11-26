@@ -280,6 +280,38 @@ impl Launcher {
             .into_any_element()
     }
 
+    /// Always reserves one line so progress cannot move the Play row.
+    fn profile_play_detail(
+        &self,
+        instance: &instances::Instance,
+        compact: bool,
+        text: gpui::Rgba,
+    ) -> Div {
+        let played = match played_line(instance.played, instance.last_played) {
+            Some((time, last)) => format!("{time}  ·  {last}"),
+            None => tr("Not played yet").to_string(),
+        };
+        let view = self.launch_facts().view();
+        let (line, tabular) = match view.play_detail {
+            Some(detail) => (detail, true),
+            None => (played, false),
+        };
+        div()
+            .mt(px(if compact { 5. } else { 10. }))
+            .h(px(22.))
+            .max_w_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(tokens::BODY))
+            .text_color(text)
+            .when(tabular, |d| {
+                d.font_family(theme::MONO).text_size(px(tokens::LABEL))
+            })
+            .truncate()
+            .child(line)
+    }
+
     /// The selected profile: its mark and name, its play time, then Play, the build it plays
     /// and what Play has to say.
     fn profile_header(
@@ -289,10 +321,6 @@ impl Launcher {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        let played = match played_line(instance.played, instance.last_played) {
-            Some((time, last)) => format!("{time}  ·  {last}"),
-            None => tr("Not played yet").to_string(),
-        };
         let p = palette();
         let scenery = self.settings.scenery();
         let text = rgb(if scenery { p.hero.text } else { p.text });
@@ -328,15 +356,7 @@ impl Launcher {
                             .child(instance.name.clone()),
                     ),
             )
-            .child(
-                div()
-                    .mt(px(if compact { 5. } else { 10. }))
-                    .max_w_full()
-                    .text_size(px(tokens::BODY))
-                    .text_color(text)
-                    .truncate()
-                    .child(played),
-            );
+            .child(self.profile_play_detail(instance, compact, text));
         let receipt =
             instance.kind != instances::Kind::Pack && self.check_build_changes(&instance.home, cx);
         div()
@@ -412,7 +432,15 @@ impl Launcher {
                 d.tooltip(crate::glass_ui::tip(text))
             })
             .when(idle, |d| d.child(blocks::icon("play", 17., on.into())))
-            .child(view.main.label())
+            .child(
+                if view.play_detail.is_some()
+                    && matches!(view.main, Main::Step(backend::PlayStep::Assets))
+                {
+                    tr("Preparing…").into()
+                } else {
+                    view.main.label()
+                },
+            )
             .when(view.enabled, |d| {
                 d.cursor_pointer()
                     .hover(move |s| {

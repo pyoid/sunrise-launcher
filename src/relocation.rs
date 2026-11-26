@@ -200,7 +200,7 @@ pub fn run_worker() -> Option<i32> {
         let destination = data_location::migrate_current_with_prepare(
             &source,
             &target,
-            |message| eprintln!("{message}"),
+            |message| crate::elog!("{message}"),
             |stage, target| {
                 ensure_idle(&source)?;
                 prepare_paths(stage, &source, target)
@@ -210,7 +210,7 @@ pub fn run_worker() -> Option<i32> {
         Ok::<_, String>(backup)
     })();
     if let Err(error) = &result {
-        eprintln!("Data was not relocated: {error}");
+        crate::elog!("Data was not relocated: {error}");
     }
     let code = i32::from(result.is_err());
     if restart {
@@ -227,7 +227,7 @@ pub fn run_worker() -> Option<i32> {
             }
         }
         if let Err(e) = command.spawn() {
-            eprintln!("Could not reopen the launcher: {e}");
+            crate::elog!("Could not reopen the launcher: {e}");
             return Some(1);
         }
     }

@@ -13,7 +13,7 @@ pub(super) fn run() {
         .stack_size(16 * 1024 * 1024)
         .spawn(run_launcher)
         .unwrap_or_else(|error| {
-            eprintln!(
+            sunrise_launcher::elog!(
                 "{}",
                 trf(
                     "Could not start the launcher: {error}",
@@ -36,7 +36,7 @@ pub(super) fn run() {
 fn run_launcher() {
     sunrise_launcher_smod::holder::retain_capability();
     if let Err(error) = console::attach_for_cli() {
-        eprintln!(
+        sunrise_launcher::elog!(
             "{}",
             trf(
                 "Could not restore the launcher's terminal streams: {error}",
@@ -51,7 +51,7 @@ fn run_launcher() {
     // A broken pointer may open Settings with Retry/Use the default folder; failing to
     // acquire the lease is different. Never run a writer while Move owns the data roots.
     if let Err(error) = sunrise_launcher::data_location::startup() {
-        eprintln!("{error}");
+        sunrise_launcher::elog!("{error}");
         std::process::exit(1);
     }
     // Windowless Windows installer commands, including the new binary's notice refresh, never
@@ -62,6 +62,18 @@ fn run_launcher() {
     }
     // Do not copy earlier launchers' data into fallback roots for a broken configured location.
     let location_error = sunrise_launcher::data_location::startup_error();
+    if location_error.is_none() {
+        use sunrise_launcher::game_log::launcher;
+        let _ = sunrise_launcher::account::Accounts::load();
+        for world in std::fs::read_dir(backend::game_home().join("saves"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            launcher::hide(world.file_name().to_string_lossy());
+        }
+        launcher::init(&backend::data_dir().join("logs"));
+    }
     let carry_over_error = if location_error.is_none() {
         sunrise_launcher::carry_over::at_start().err()
     } else {
@@ -95,7 +107,7 @@ fn run_launcher() {
         if location_error.is_none() && carry_over_error.is_none() {
             backend::recover_game_installations();
             if let Err(error) = sunrise_launcher::instances::initialize_default() {
-                eprintln!("{error}");
+                sunrise_launcher::elog!("{error}");
             }
         }
         if let Some(code) = cli::run() {

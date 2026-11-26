@@ -290,7 +290,7 @@ pub fn install(checkout: &Path, program: &Path, trusted: bool) -> Result<String,
     // `prepare` and no official launcher folder (#4315). Run again for the same checkout to pick
     // them up after preparing it; the tag has not changed, so nothing else is installed.
     if let Err(error) = reuse_checkout_resources(&checkout, &tag) {
-        eprintln!(
+        crate::elog!(
             "{}",
             trf(
                 "{tag}: the checkout's prepared resources were not copied: {error}",

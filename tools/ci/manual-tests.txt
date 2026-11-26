@@ -12,3 +12,4 @@ sunrise-launcher storage::inventory::eviction_tests::allocated_forty_gib_cleanup
 sunrise-launcher downloads::tests::benchmark_download_pipeline by-hand manual # local download throughput benchmark; run explicitly in a fresh process per mode
 sunrise-launcher-smod holder::game_entry::tests::write_missing_registration_actor subprocess manual # fixture writer subprocess only
 sunrise-launcher-telemetry payload::tests::what_this_machine_sends by-hand manual # prints what this machine would send; run with --ignored --nocapture
+sunrise-launcher browser::sunrise::registry_install::update_tests::native::source_lock::a_source_folder_without_a_lock_builds_with_the_one_native_lock_writes by-hand manual # build the launcher binary first; uses the native tool fixture

@@ -121,7 +121,7 @@ impl Bounded {
         use std::sync::atomic::Ordering::SeqCst;
         let no_answer = || {
             let said = keyring_no_answer(self.wait);
-            eprintln!("Sunrise: {said}");
+            crate::elog!("Sunrise: {said}");
             Err(said.into())
         };
         if self.stuck.load(SeqCst) > 0 {

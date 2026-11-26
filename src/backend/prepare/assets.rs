@@ -28,7 +28,7 @@ pub(crate) fn complete_assets_staged(tag: &str, handoff: &crate::preparer::Hando
         &versions_dir(),
         tag,
         minecraft_folders,
-        &|line| eprintln!("{line}"),
+        &|line| crate::elog!("{line}"),
         Some(handoff),
     );
 }
@@ -83,8 +83,8 @@ pub(in crate::backend) fn refill_own_store(tag: &str, handoff: &crate::preparer:
             .map_err(|e| e.to_string())?;
         Ok(body)
     };
-    if let Err(e) = download_for_owner(&pins, &own, &fetch, None, &|line| eprintln!("{line}")) {
-        eprintln!("{tag}: the missing assets were not downloaded: {e}");
+    if let Err(e) = download_for_owner(&pins, &own, &fetch, None, &|line| crate::elog!("{line}")) {
+        crate::elog!("{tag}: the missing assets were not downloaded: {e}");
     }
 }
 
@@ -115,10 +115,18 @@ pub(in crate::backend) fn complete_assets_in(
     let Some(binary) = crate::preparer::binary(&root) else {
         return;
     };
+    let checking = crate::game_log::launcher::step("Checking game files");
     let lacking = match crate::preparer::missing_extras(&binary, &root, &resources, handoff) {
-        Ok(Some(lacking)) if !lacking.is_empty() => lacking,
-        Ok(_) => return,
-        Err(e) => return log(format!("{tag}: {e}")),
+        Ok(Some(lacking)) if !lacking.is_empty() => {
+            checking.done(format!("{} to fetch", lacking.len()));
+            lacking
+        }
+        Ok(Some(_)) => return checking.done("nothing to fetch"),
+        Ok(None) => return checking.done("this version's preparer cannot check"),
+        Err(e) => {
+            checking.failed(&e);
+            return log(format!("{tag}: {e}"));
+        }
     };
     if stopped() {
         return;
@@ -131,8 +139,16 @@ pub(in crate::backend) fn complete_assets_in(
         return log(format!("{tag}: {error}"));
     }
     let kinds: Vec<String> = lacking.iter().map(|(kind, _)| kind.clone()).collect();
+    let fetching = crate::game_log::launcher::step(format!(
+        "Fetching missing game files ({})",
+        kinds.join(", ")
+    ));
     let result =
         crate::preparer::add_extras(&binary, &root, &resources, &kinds, &folders(), log, handoff);
+    match &result {
+        Ok(_) => fetching.done(""),
+        Err(e) => fetching.failed(e),
+    }
     if !stopped() {
         tried.push(root.clone());
     }
@@ -281,7 +297,7 @@ pub(in crate::backend) fn download_for(
                 sources::Os::MacOs => "osx",
                 sources::Os::Windows => "windows",
             };
-            mojang::download(pins, dir, os, 8, fetch, cancel, log).map_err(|e| {
+            mojang::download(pins, dir, os, crate::backend::http::DOWNLOAD_JOBS, fetch, cancel, log).map_err(|e| {
                 format!("\n  • Sunrise tried to download {v} from Mojang for {name}, but: {e}")
             })
         }

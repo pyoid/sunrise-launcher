@@ -1,4 +1,5 @@
 //! Installing and removing builds, preparing and starting the game, and the accounts' sign-in.
+
 use super::*;
 
 /// Who and what Play was accepted for, before any install, preparation or build.
@@ -339,7 +340,11 @@ impl Launcher {
         let tx = self.tx.clone();
         // The checks may download the server jar, so they run on the thread too.
         std::thread::spawn(move || {
-            let log = |line| {
+            let _detail = Self::play_detail_sink(&tx);
+            let log = |line: String| {
+                if !line.contains("Session ID is") {
+                    sunrise_launcher::game_log::launcher::line(format!("Preparing: {line}"));
+                }
                 let _ = tx.send(Msg::Line(Job::Prepare, line));
             };
             let result = (|| {
@@ -455,11 +460,13 @@ impl Launcher {
         self.play_pressed = Some(Instant::now());
         self.starting_client = Some(target.clone().unwrap_or_default());
         self.play_step = Some(backend::PlayStep::Assets);
+        self.play_detail = None;
         self.play_download = None;
         let cancellation = native_mods::Cancellation::default();
         self.native_cancellation = Some(cancellation.clone());
         let tx = self.tx.clone();
         std::thread::spawn(move || {
+            let _detail = Self::play_detail_sink(&tx);
             let result = Client {
                 instance: &instance,
                 accepted_account: intent.account.as_deref(),
@@ -505,6 +512,7 @@ impl Launcher {
                         },
                         Progress::Native(step) => Msg::NativeProgress(step),
                         Progress::NativeLog(output) => Msg::ManagedBuildLog(output),
+                        Progress::Verify => Msg::PlayStep(backend::PlayStep::Assets),
                         Progress::SignIn => Msg::PlayStep(backend::PlayStep::SignIn),
                         Progress::Line(line) | Progress::HookLine(line) => {
                             Msg::Line(Job::Prepare, line)
@@ -548,6 +556,7 @@ impl Launcher {
         // session arrives.
         self.starting_client = Some(tag.clone());
         self.play_step = None;
+        self.play_detail = None;
         self.play_download = None;
         let accepted = intent.account.clone();
         self.play_pressed = Some(Instant::now());

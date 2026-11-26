@@ -1455,6 +1455,9 @@ fn an_installed_legacy_pin_still_starts_its_client() {
             .env("SUNRISE_HOME", root.path().join("game"))
             .env("SUNRISE_TELEMETRY_URL", "off")
             .env("SUNRISE_NO_KEYCHAIN", "1")
+            // No Microsoft app: the stored token stands in for a sign-in and no service is
+            // contacted, also in a build that has the app ID built in (the release build).
+            .env("SUNRISE_MSA_CLIENT_ID", "")
             .status()
             .unwrap()
             .success());
@@ -1516,6 +1519,9 @@ fn same_day_rolling_nightly_remains_the_play_target_offline() {
             .env("SUNRISE_HOME", root.path().join("game"))
             .env("SUNRISE_TELEMETRY_URL", "off")
             .env("SUNRISE_NO_KEYCHAIN", "1")
+            // No Microsoft app: the stored token stands in for a sign-in and no service is
+            // contacted, also in a build that has the app ID built in (the release build).
+            .env("SUNRISE_MSA_CLIENT_ID", "")
             .status()
             .unwrap()
             .success());

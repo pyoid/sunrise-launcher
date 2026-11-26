@@ -30,7 +30,7 @@ impl Profile {
             (command, selection),
             &[],
             piped,
-            || Ok(()),
+            |_| Ok(()),
         )
         .map_err(String::from)
     }
@@ -51,7 +51,7 @@ impl Profile {
             command,
             (launch, piped, &|_| {}),
             |_| Ok(()),
-            || Ok(()),
+            |_| Ok(()),
         )
     }
 
@@ -62,7 +62,7 @@ impl Profile {
         mut command: Command,
         (launch, piped, hook_log): (&crate::launch::Launch, bool, &dyn Fn(String)),
         prepare_jars: impl FnOnce(&Command) -> Result<(), String>,
-        check_account: impl FnOnce() -> Result<(), String>,
+        before_spawn: impl FnOnce(&mut Command) -> Result<(), StartError>,
     ) -> Result<(Child, RuntimeGuard), StartError> {
         let wrapper = crate::launch::managed_wrapper(&mut command, launch);
         let selection = validate_selection(self.home(), &active.resource_path(), &command)?;
@@ -75,7 +75,7 @@ impl Profile {
             (command, selection),
             &wrapper,
             piped,
-            check_account,
+            before_spawn,
         )
     }
 
@@ -86,7 +86,7 @@ impl Profile {
         selected: (Command, LaunchArguments),
         wrapper: &[std::ffi::OsString],
         piped: bool,
-        check_account: impl FnOnce() -> Result<(), String>,
+        before_spawn: impl FnOnce(&mut Command) -> Result<(), StartError>,
     ) -> Result<(Child, RuntimeGuard), StartError> {
         self.verified_handoff(active, cancellation, |profile| {
             let (command, selection) = selected;
@@ -146,7 +146,10 @@ impl Profile {
                 use std::os::unix::process::CommandExt;
                 command.process_group(0);
             }
-            check_account()?;
+            // Last, so the game's session file is as young as it can be: the checks above can
+            // take longer than the game keeps one.
+            before_spawn(&mut command)?;
+            cancellation.check()?;
             let child = if wrapper.is_empty() {
                 let program = command.get_program().to_string_lossy().into_owned();
                 leases

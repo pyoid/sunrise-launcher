@@ -185,11 +185,25 @@ fn game_replacements_leave_registry_rows_alone_and_advance_the_same_base() {
     let mut expected = initial.clone();
     for version in ["1.1.0", "1.2.0"] {
         write_package(version);
-        assert!(profile
-            .verified_handoff::<(), String>(&previous, &cancellation, |_| panic!(
-                "stale game launched"
-            ))
-            .is_err());
+        let command =
+            backend::client_with_resources(previous.executable(), &previous.resource_path());
+        let jars_checked = std::cell::Cell::new(false);
+        let result = profile.spawn_checked_account(
+            &previous,
+            &cancellation,
+            command,
+            (&crate::launch::Launch::default(), false, &|_| {}),
+            |_| {
+                jars_checked.set(true);
+                Ok(())
+            },
+            |_| panic!("a stale game reached the late account request"),
+        );
+        assert!(
+            jars_checked.get(),
+            "the command must reach pre-spawn work before the stale check"
+        );
+        assert!(result.is_err());
         // Play adopts the new bytes as its input on the same base; the registry row stays as
         // it was, since only a registry install or update restamps it.
         let current = profile

@@ -127,7 +127,11 @@ impl Launcher {
     /// now: what the top bar's narrow layouts go by, so they change when the room does, part
     /// way through an ease, not on the press that starts it.
     pub(crate) fn bar_width(&self) -> f32 {
-        self.window_width - (rail_width(self.rail_open()) - CLOSED)
+        self.window_width - (self.sidebar_width() - CLOSED)
+    }
+
+    pub(crate) fn sidebar_width(&self) -> f32 {
+        rail_width(self.rail_open())
     }
 
     /// How open the sidebar is drawn: 0 closed, 1 open, between while it eases. The frame's
@@ -515,6 +519,12 @@ impl Launcher {
                 self.links.website.clone(),
             ),
             (
+                "sidebar-logs",
+                tr("Logs"),
+                "computer-terminal-01",
+                String::new(),
+            ),
+            (
                 "sidebar-settings",
                 tr("Settings"),
                 "sliders-horizontal",
@@ -522,11 +532,12 @@ impl Launcher {
             ),
         ] {
             let settings = id == "sidebar-settings";
+            let logs = id == "sidebar-logs";
             rail = rail.child(
                 row(
                     id.into(),
                     label.into(),
-                    settings && self.ui.page == Page::Settings,
+                    (settings && self.ui.page == Page::Settings) || (logs && self.logs_open()),
                 )
                 .child(icon_slot(crate::glass_ui::icon(
                     icon,
@@ -534,9 +545,11 @@ impl Launcher {
                     rgb(p.chrome_muted).into(),
                 )))
                 .when(labelled, |d| d.child(txt(label.into())))
-                .when(settings || !url.is_empty(), |d| {
+                .when(settings || logs || !url.is_empty(), |d| {
                     d.on_click(cx.listener(move |this, _, _, cx| {
-                        if settings {
+                        if logs {
+                            this.toggle_logs();
+                        } else if settings {
                             this.navigate(Page::Settings);
                         } else {
                             Self::open_url(&url, cx);

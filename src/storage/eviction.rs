@@ -49,7 +49,7 @@ pub fn request_cleanup() {
     #[cfg(not(test))]
     std::thread::spawn(|| {
         if let Err(error) = cleanup() {
-            eprintln!("{}", crate::native_mods::cache_error(error));
+            crate::elog!("{}", crate::native_mods::cache_error(error));
         }
     });
 }
@@ -81,7 +81,7 @@ pub fn cleanup_after_start() {
         std::thread::sleep(std::time::Duration::from_secs(60));
         if let Err(error) = cleanup() {
             // Busy is a refusal, not a retry loop. Keep the held build untouched.
-            eprintln!("{}", crate::native_mods::cache_error(error));
+            crate::elog!("{}", crate::native_mods::cache_error(error));
         }
     });
 }

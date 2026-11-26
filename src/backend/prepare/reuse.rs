@@ -125,7 +125,7 @@ pub(in crate::backend) fn reuse_prepared_for_cancellable(
     }
     if check_prepared(tag) {
         if let Err(error) = finish_preparation_cancellable(tag, &preparation, stop) {
-            eprintln!("{tag}: {error}");
+            crate::elog!("{tag}: {error}");
         }
     }
     drop(preparation);
@@ -137,11 +137,11 @@ pub(in crate::backend) fn reuse_prepared_for_cancellable(
         .name("Prepared data file".into())
         .spawn(move || {
             if let Err(e) = write_data_file(&root, &resources) {
-                eprintln!("{}: not written: {e}", resources.display());
+                crate::elog!("{}: not written: {e}", resources.display());
             }
         });
     if let Err(e) = spawned {
-        eprintln!("{tag}: the data file was not written: {e}");
+        crate::elog!("{tag}: the data file was not written: {e}");
     }
 }
 
@@ -185,7 +185,7 @@ pub fn reuse_prepared_everywhere() -> Vec<(String, String)> {
         refill_own_store(&tag, &handoff);
         if reused.iter().any(|(prepared, _)| prepared == &tag) {
             if let Err(error) = finish_preparation(&tag, &preparation) {
-                eprintln!("{tag}: {error}");
+                crate::elog!("{tag}: {error}");
             }
         } else {
             complete_assets_staged(&tag, &handoff);

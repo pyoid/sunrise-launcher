@@ -228,7 +228,13 @@ fn monitor(
         readers.push(std::thread::spawn(move || {
             for line in BufReader::new(stream).lines().map_while(Result::ok) {
                 let live = recover(&forwarding);
-                if !*live || tx.send(Msg::Line(job, line)).is_err() {
+                if !*live {
+                    break;
+                }
+                if job == Job::Prepare && !line.contains("Session ID is") {
+                    crate::game_log::launcher::line(format!("Preparing: {line}"));
+                }
+                if tx.send(Msg::Line(job, line)).is_err() {
                     break;
                 }
             }

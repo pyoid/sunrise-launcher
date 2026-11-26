@@ -11,6 +11,7 @@ impl Launcher {
                 match job {
                     Job::Prepare => {
                         self.preparing = false;
+                        self.play_detail = None;
                         self.refresh_open_storage_builds();
                         // Play pressed before the version was prepared plays now.
                         if let Some((tag, intent)) = self.play_when_prepared.take() {
@@ -249,6 +250,9 @@ impl Launcher {
                     account::discard_launch_session(session_file);
                     return;
                 }
+                self.play_step = None;
+                self.play_detail = None;
+                self.play_download = None;
                 for notice in &registry_notices {
                     console_page::keep_line(
                         &mut self.prepare_log,

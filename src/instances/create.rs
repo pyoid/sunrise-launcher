@@ -281,7 +281,7 @@ pub(super) fn create_with_publish(
                 }
                 Err(error) => {
                     // The sidecar is already durable. Do not unpublish or discard it.
-                    eprintln!("Sunrise: instances.json is not saved: {error}");
+                    crate::elog!("Sunrise: instances.json is not saved: {error}");
                 }
             }
             Ok(())

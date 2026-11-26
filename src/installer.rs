@@ -596,7 +596,7 @@ pub fn run_quiet() -> Option<i32> {
         return Some(match ensure_notices() {
             Ok(()) => 0,
             Err(error) => {
-                eprintln!("The licences: {error}");
+                crate::elog!("The licences: {error}");
                 1
             }
         });
@@ -606,12 +606,12 @@ pub fn run_quiet() -> Option<i32> {
         Invocation::QuietUninstall => Some(match uninstall(flag("--remove-data"), |_, _| {}) {
             Ok(left) => {
                 for item in left {
-                    eprintln!("Not removed: {item}");
+                    crate::elog!("Not removed: {item}");
                 }
                 0
             }
             Err(e) => {
-                eprintln!("{e}");
+                crate::elog!("{e}");
                 1
             }
         }),
@@ -631,7 +631,7 @@ pub fn run_quiet() -> Option<i32> {
                     0
                 }
                 Err(e) => {
-                    eprintln!("{e}");
+                    crate::elog!("{e}");
                     1
                 }
             })

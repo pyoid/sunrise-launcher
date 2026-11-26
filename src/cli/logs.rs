@@ -19,7 +19,11 @@ pub(super) fn share(instance: Option<String>, as_json: bool) -> Result<(), Error
     };
     let path = i.home.join("logs/latest.log");
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let names = game_log::names(&[&i.home, &backend::game_home()]);
+    let accounts = sunrise_launcher::account::Accounts::load().accounts;
+    let names = game_log::names(
+        &[&i.home, &backend::game_home()],
+        accounts.into_iter().map(|a| a.name),
+    );
     let text = game_log::private(&text, dirs::home_dir().as_deref(), &names);
     let shared = game_log::share(&game_log::api(), &text)?;
     if as_json {

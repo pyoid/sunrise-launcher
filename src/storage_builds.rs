@@ -141,7 +141,7 @@ impl Launcher {
         let outcome = result.as_ref().ok()?;
         let receipts = &mut self.storage_builds.receipts;
         if let Some(warning) = outcome.receipt_warning() {
-            eprintln!("{}", warning.detail());
+            sunrise_launcher::elog!("{}", warning.detail());
             receipts.insert(
                 tag.to_owned(),
                 ReceiptNotice {
@@ -169,7 +169,7 @@ impl Launcher {
             return;
         };
         if let Err(error) = result {
-            eprintln!(
+            sunrise_launcher::elog!(
                 "Could not retry the rolling receipt for {}: {error}",
                 warning.tag()
             );

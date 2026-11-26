@@ -135,7 +135,7 @@ fn list_snapshot(
         }
         if housekeeping && (retained != before || store.instances.len() != retained) {
             if let Err(error) = store.save(data) {
-                eprintln!("Sunrise: instances.json is not saved: {error}");
+                crate::elog!("Sunrise: instances.json is not saved: {error}");
             }
         }
     }
@@ -175,7 +175,7 @@ fn list_snapshot(
     }
     if admitted && housekeeping && recovered_choices {
         if let Err(error) = store.save(data) {
-            eprintln!("Sunrise: instances.json is not saved: {error}");
+            crate::elog!("Sunrise: instances.json is not saved: {error}");
         }
     }
     let mut out: Vec<Instance> = found

@@ -189,6 +189,7 @@ pub struct Blame {
 #[serde(rename_all = "kebab-case")]
 pub enum BlameKind {
     Compile,
+    /// A build script, which the tool of a game build made before mods could run one refused.
     BuildScript,
     Features,
 }

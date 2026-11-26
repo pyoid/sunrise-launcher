@@ -466,17 +466,26 @@ impl Profile {
         spawn: impl FnOnce(ProfileHandoff<'_>) -> Result<T, E>,
     ) -> Result<T, E> {
         let home = self.home();
+        let checking = crate::game_log::launcher::step("Verifying the game and its prepared files");
         let _manifest = game_lock(home)?;
-        crate::managed_play::recover_game_install(home).map_err(String::from)?;
-        if self.active()?.as_ref() != Some(active) || inputs(home)? != active.inputs {
-            return Err(unsettled!().into());
+        checking.note("the profile's lock is held");
+        let verified = (|| {
+            crate::managed_play::recover_game_install(home).map_err(String::from)?;
+            if self.active()?.as_ref() != Some(active) || inputs(home)? != active.inputs {
+                return Err(unsettled!());
+            }
+            active.verify_artifacts()?;
+            active
+                .resources
+                .check_play_output(active.base())
+                .map_err(|issue| issue.message(|| unsettled!()))?;
+            super::verify_included(active.base(), active.executable(), home)
+        })();
+        match &verified {
+            Ok(()) => checking.done(""),
+            Err(why) => checking.failed(why),
         }
-        active.verify_artifacts()?;
-        active
-            .resources
-            .check_play_output(active.base())
-            .map_err(|issue| issue.message(|| unsettled!()))?;
-        super::verify_included(active.base(), active.executable(), home)?;
+        verified?;
         cancellation.check()?;
         spawn(self.handoff())
     }

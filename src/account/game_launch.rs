@@ -82,6 +82,16 @@ pub fn launch(
     store: &dyn SecretStore,
     accounts: &mut Accounts,
 ) -> Result<Launch, NoOwner> {
+    launch_checked(ep, client_id, store, accounts, false)
+}
+
+fn launch_checked(
+    ep: &Endpoints,
+    client_id: Option<&str>,
+    store: &dyn SecretStore,
+    accounts: &mut Accounts,
+    for_game: bool,
+) -> Result<Launch, NoOwner> {
     let selected = accounts.selected.clone();
     let mut order = accounts.accounts.clone();
     order.sort_by_key(|a| Some(&a.uuid) != selected.as_ref());
@@ -103,7 +113,7 @@ pub fn launch(
                     "Can't read {name}'s sign-in: {why}",
                     &[("name", &account.name), ("why", &why.0)],
                 );
-                eprintln!("Sunrise: {said}");
+                crate::elog!("Sunrise: {said}");
                 if plays {
                     pass.offline = Some(said.clone());
                 }
@@ -135,7 +145,23 @@ pub fn launch(
                 (None, secrets)
             }
             Check::DoesNot(secrets) => (Some(DOES_NOT_OWN.to_string()), secrets),
-            Check::NoAnswer(e, secrets) => (Some(e.to_string()), secrets),
+            Check::NoAnswer(e, secrets) => {
+                // The game itself keeps a one-minute margin. Give its read-once handoff
+                // the released five minutes, and use only this account's verified token.
+                if for_game
+                    && plays
+                    && matches!(e, SignInError::Unavailable(_))
+                    && secrets.owns
+                    && !secrets.sign_in_required
+                    && secrets.minecraft_expires_at > now() + 300
+                    && !secrets.minecraft_token.is_empty()
+                {
+                    pass.session = Some((account.clone(), secrets.clone()));
+                    (None, secrets)
+                } else {
+                    (Some(e.to_string()), secrets)
+                }
+            }
         };
         owned = secrets.owns;
         if plays {
@@ -180,15 +206,10 @@ pub fn launch_for_game(
     if accounts.selected().is_none() {
         accounts.selected = accounts.accounts.first().map(|a| a.uuid.clone());
     }
-    let pass = launch(ep, client_id, store, accounts)?;
-    let owns = accounts
-        .selected()
-        .and_then(|a| secrets_in(store, &a.uuid))
-        .is_some_and(|s| s.owns);
-    if owns {
+    let pass = launch_checked(ep, client_id, store, accounts, true)?;
+    if pass.session.is_some() {
         Ok(pass)
     } else {
-        // Why that account can't play (it doesn't own the game, signed out, an unread keyring).
         Err(NoOwner {
             keyring: pass.offline,
         })
@@ -239,7 +260,11 @@ pub fn write_session_file(
         "user_type": "msa",
         "xuid": secrets.xuid,
     });
-    std::io::Write::write_all(&mut file, body.to_string().as_bytes()).map_err(|e| e.to_string())?;
+    if let Err(error) = std::io::Write::write_all(&mut file, body.to_string().as_bytes()) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(error.to_string());
+    }
     Ok(path)
 }
 
@@ -370,9 +395,9 @@ pub fn session_for_game(game_home: &Path) -> Result<GameSession, NoOwner> {
         &mut accounts,
     )?;
     if let Err(e) = accounts.save_renewed() {
-        eprintln!("Sunrise: the accounts are not saved: {e}");
+        crate::elog!("Sunrise: the accounts are not saved: {e}");
     }
-    Ok(session_file(game_home, pass))
+    session_file(game_home, pass)
 }
 
 /// [`session_for_game`] for the account that was selected when Play was accepted, `accepted`:
@@ -389,9 +414,12 @@ pub fn session_for_game_accepted(game_home: &Path, accepted: &str) -> Result<Gam
         accepted,
     )?;
     if let Err(e) = accounts.save_renewed() {
-        eprintln!("Sunrise: the accounts are not saved: {e}");
+        crate::elog!("Sunrise: the accounts are not saved: {e}");
     }
-    Ok(session_file(game_home, pass))
+    // The provider call can take time. Do not write for an account removed meanwhile.
+    let _operation = session::lock(store()).map_err(|why| NoOwner { keyring: Some(why) })?;
+    check_launch_account(&Accounts::load(), accepted)?;
+    session_file(game_home, pass)
 }
 
 pub(super) fn launch_accepted(
@@ -437,9 +465,9 @@ pub fn session_for_game_as(game_home: &Path, who: &str) -> Result<GameSession, S
         who,
     );
     if let Err(e) = accounts.save_renewed() {
-        eprintln!("Sunrise: the accounts are not saved: {e}");
+        crate::elog!("Sunrise: the accounts are not saved: {e}");
     }
-    Ok(session_file(game_home, pass?))
+    session_file(game_home, pass?).map_err(|why| why.to_string())
 }
 
 /// The owner gate as `who`, on `accounts`, which keeps its choice of player.
@@ -459,16 +487,14 @@ pub(super) fn launch_as(
 }
 
 /// The game's session files for a launch that passed the gate.
-fn session_file(game_home: &Path, pass: Launch) -> GameSession {
-    let mut out = GameSession {
-        offline: pass.offline,
-        ..GameSession::default()
-    };
-    if let Some((account, secrets)) = pass.session {
-        match write_launch_session_file(&game_home.join("sessions"), &account, &secrets) {
-            Ok(file) => out.file = Some(file),
-            Err(e) => out.offline = Some(e),
-        }
-    }
-    out
+pub(super) fn session_file(game_home: &Path, pass: Launch) -> Result<GameSession, NoOwner> {
+    let (account, secrets) = pass.session.ok_or(NoOwner {
+        keyring: pass.offline,
+    })?;
+    let file = write_launch_session_file(&game_home.join("sessions"), &account, &secrets)
+        .map_err(|why| NoOwner { keyring: Some(why) })?;
+    Ok(GameSession {
+        file: Some(file),
+        offline: None,
+    })
 }
