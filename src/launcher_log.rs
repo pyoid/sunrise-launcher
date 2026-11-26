@@ -223,7 +223,7 @@ pub fn play_detail_ui_only(text: impl Into<String>) {
 pub struct PlayMeter {
     sink: Option<PlayDetailSink>,
     format: fn(usize, usize) -> String,
-    state: Mutex<(Option<Instant>, Option<Instant>)>,
+    state: Mutex<(Option<Instant>, Option<Instant>, usize)>,
 }
 
 impl PlayMeter {
@@ -232,7 +232,7 @@ impl PlayMeter {
         Self {
             sink,
             format,
-            state: Mutex::new((None, None)),
+            state: Mutex::new((None, None, 0)),
         }
     }
 
@@ -241,11 +241,16 @@ impl PlayMeter {
             return;
         }
         let now = Instant::now();
-        let (emit_ui, emit_log) = {
+        let (emit_ui, emit_log, shown) = {
             let mut guard = lock(&self.state);
+            let done = done.min(total);
+            if done > guard.2 {
+                guard.2 = done;
+            }
+            let shown = guard.2;
             let ui = self.sink.is_some()
-                && (done == 1
-                    || done >= total
+                && (shown == 1
+                    || shown >= total
                     || guard.0.is_none_or(|t| {
                         now.saturating_duration_since(t) >= Duration::from_millis(250)
                     }));
@@ -258,12 +263,12 @@ impl PlayMeter {
             if log {
                 guard.1 = Some(now);
             }
-            (ui, log)
+            (ui, log, shown)
         };
         if !emit_ui && !emit_log {
             return;
         }
-        let text = (self.format)(done.min(total), total);
+        let text = (self.format)(shown, total);
         if emit_log {
             line(&text);
         }

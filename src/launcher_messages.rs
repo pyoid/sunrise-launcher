@@ -145,10 +145,10 @@ impl Launcher {
                 Msg::Playing(playing) => self.playing = playing,
                 Msg::PlayStep(step) => {
                     if self.starting_client.is_some() {
-                        self.play_step = Some(step);
-                        if matches!(step, backend::PlayStep::SignIn | backend::PlayStep::Native) {
+                        if self.play_step != Some(step) {
                             self.play_detail = None;
                         }
+                        self.play_step = Some(step);
                     }
                     if step == backend::PlayStep::SignIn && self.native_step.take().is_some() {
                         self.native_progress = None;
