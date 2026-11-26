@@ -24,7 +24,7 @@ fn check_url(url: &url::Url, hosts: &[&str]) -> Result<(), String> {
         || !url.username().is_empty()
         || url.password().is_some()
     {
-        return Err("Refused download URL outside allowed HTTPS hosts".into());
+        return Err(crate::i18n::tr("Refused download URL outside allowed HTTPS hosts").into());
     }
     Ok(())
 }

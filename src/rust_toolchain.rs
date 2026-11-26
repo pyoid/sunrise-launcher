@@ -429,11 +429,19 @@ impl Toolchain {
             .command(&self.rustc())
             .arg("--version")
             .output()
-            .map_err(|e| format!("Rust {VERSION} doesn't start: {e}"))?;
+            .map_err(|e| {
+                crate::i18n::trf(
+                    "Rust {version} doesn't start: {error}",
+                    &[("version", VERSION), ("error", &e.to_string())],
+                )
+            })?;
         if !out.status.success() {
-            return Err(format!(
-                "Rust {VERSION} doesn't start: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
+            return Err(crate::i18n::trf(
+                "Rust {version} doesn't start: {stderr}",
+                &[
+                    ("version", VERSION),
+                    ("stderr", String::from_utf8_lossy(&out.stderr).trim()),
+                ],
             ));
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
