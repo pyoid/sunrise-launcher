@@ -82,7 +82,7 @@ const PREBUILT_IDENTITY: &str = "sunrise-prebuilt.json";
 /// from is the one it is built with.
 #[derive(Clone, Debug)]
 pub(super) enum Chosen {
-    Signed(sdk_cache::Sdk),
+    Signed(Box<sdk_cache::Sdk>),
     Local { folder: PathBuf, sha256: String },
 }
 
@@ -103,8 +103,8 @@ impl Chosen {
             });
         }
         match release {
-            Some(sdk) => Ok(Self::Signed(sdk)),
-            None => published().map(Self::Signed),
+            Some(sdk) => Ok(Self::Signed(Box::new(sdk))),
+            None => published().map(|sdk| Self::Signed(Box::new(sdk))),
         }
     }
 
@@ -380,7 +380,7 @@ pub(super) fn versions(version: &str) -> impl Iterator<Item = String> + '_ {
 /// Where a plan goes in the version sequence.
 enum Slot {
     /// An installed build that holds the plan.
-    Proved(String, Evidence),
+    Proved(String, Box<Evidence>),
     /// A path nothing is at: publication can take it.
     Vacant(String),
 }
@@ -399,7 +399,7 @@ fn slot(version: &str, contents: &Contents<'_>, image: &Image) -> Option<Slot> {
             }
             _ if installed(&candidate) => {
                 if let Some(evidence) = Evidence::prove(&candidate, contents, image) {
-                    return Some(Slot::Proved(candidate, evidence));
+                    return Some(Slot::Proved(candidate, Box::new(evidence)));
                 }
             }
             _ => {}
@@ -416,7 +416,7 @@ pub(super) fn installable(
     image: &Image,
 ) -> Result<(String, Option<Evidence>), Failed> {
     match slot(version, contents, image) {
-        Some(Slot::Proved(version, evidence)) => Ok((version, Some(evidence))),
+        Some(Slot::Proved(version, evidence)) => Ok((version, Some(*evidence))),
         Some(Slot::Vacant(version)) => Ok((version, None)),
         None => Err(Failed::Other(trf(
             "Every installed build named for these mods ({version}) holds other mods or was changed after it was installed. Remove them, then build again.",
