@@ -326,10 +326,10 @@ fn both_failing_uses_the_saved_copy_else_says_so() {
         |_| Answer::Failed("No connection: timed out".into()),
     )
     .unwrap_err();
-    assert!(err.contains("rate limit"), "{err}");
-    assert!(err.contains("mirror"), "{err}");
-    assert!(err.contains("timed out"), "{err}");
-    assert!(err.contains("Try again in a few minutes"), "{err}");
+    assert_eq!(
+        err,
+        "GitHub is limiting requests from your network for now. Try again in a few minutes, or on another network."
+    );
 
     // With a copy from an earlier start, that copy is better than nothing.
     json_with(
@@ -362,7 +362,7 @@ fn other_repositories_have_no_mirror() {
         no_mirror,
     )
     .unwrap_err();
-    assert!(err.contains("rate limit"), "{err}");
+    assert!(err.contains("limiting requests"), "{err}");
     assert!(!err.contains("mirror"), "{err}");
     let _ = fs::remove_dir_all(cache);
 }
