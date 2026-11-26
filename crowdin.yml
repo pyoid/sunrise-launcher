@@ -14,3 +14,7 @@ files:
       two_letters_code:
         # Crowdin gives both Portuguese variants "pt"; the launcher's Brazilian table is pt-br.
         pt-BR: pt-br
+        # Custom languages in the Crowdin project (Crowdin's list has neither); named here so
+        # their files don't depend on what Crowdin takes as a custom language's two-letter code.
+        lmo: lmo
+        szl: szl
