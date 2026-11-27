@@ -376,3 +376,37 @@ fn allocated_total_includes_directory_metadata() {
     );
     eprintln!("independent directory allocation: {directory_bytes} bytes");
 }
+
+#[test]
+fn background_cleanup_skips_a_held_build_then_evicts_when_idle() {
+    use std::time::{Duration, SystemTime};
+    let home = Home::new();
+    let payload = home.seed("rust/old/payload");
+    fs::File::create(home.0.join("rust/old/.last-used"))
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(8 * 86400))
+        .unwrap();
+    let mut lines = Vec::new();
+    let held = Cache::acquire(&home.0).unwrap();
+    let before = (walks(), entries_calls());
+    eviction::run_background_cleanup(|| Storage::at(&home.0), |line| lines.push(line.to_owned()));
+    assert_eq!(lines, ["storage cleanup: skipped (build lease busy)"]);
+    assert_eq!((walks(), entries_calls()), before);
+    assert!(payload.exists());
+    drop(held);
+
+    let before_bytes = allocated_bytes(&home.0.join("rust/old")).unwrap();
+    lines.clear();
+    eviction::run_background_cleanup(|| Storage::at(&home.0), |line| lines.push(line.to_owned()));
+    assert!(!payload.exists());
+    let after_bytes = allocated_bytes(&home.0.join("rust/old")).unwrap();
+    let freed = before_bytes.saturating_sub(after_bytes);
+    assert!(freed > 0);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0], "storage cleanup: start");
+    let elapsed = lines[1]
+        .strip_prefix("storage cleanup: end (")
+        .and_then(|rest| rest.strip_suffix(&format!(" ms, {freed} bytes freed)")))
+        .unwrap_or_else(|| panic!("expected {freed} freed bytes in {:?}", lines[1]));
+    assert!(elapsed.parse::<u128>().is_ok(), "{}", lines[1]);
+}

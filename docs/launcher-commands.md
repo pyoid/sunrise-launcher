@@ -133,7 +133,7 @@ MCP: `server`, `server_command`, `server_log`, `server_stop`.
 
 ## `sunrise-launcher storage`
 
-Show disposable storage by category as JSON. Builds must be idle.
+Show disposable storage by category as JSON. Builds must be idle. Native builds do not evict caches on exit; reclaim disk with `storage --clear all` or a desktop launcher pass.
 
     sunrise-launcher storage
 
@@ -154,7 +154,7 @@ MCP: `native_lock`.
 
 ## `sunrise-launcher native-build`
 
-Native mods (docs/modding/src/how-to/native-mods.md): compile flat Rust mod projects against the profile's exact Sunrise source revision with the launcher's own Rust, as the version the profile then plays. Not sandboxed: the mods' code runs with your rights. If there are no native mods to build, it exits successfully; a server export still fails, as no engine is made.
+Native mods (docs/modding/src/how-to/native-mods.md): compile flat Rust mod projects against the profile's exact Sunrise source revision with the launcher's own Rust, as the version the profile then plays. Not sandboxed: the mods' code runs with your rights. If there are no native mods to build, it exits successfully; a server export still fails, as no engine is made. Builds stamp shared caches without evicting on exit; reclaim disk with `storage --clear all` or a desktop launcher pass.
 
     sunrise-launcher native-build [FOLDER]
 
