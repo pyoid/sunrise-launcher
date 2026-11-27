@@ -2,8 +2,8 @@
 //! fingerprint, the runtime reports, and running it.
 use super::{
     assets_folder, download_for_owner, ensure_server_jar, files_under, java, resources,
-    resources_at, resources_for_game, resources_owner, set_prepare_step, with_java, MinecraftFrom,
-    PrepareStep, Unprepared, PREPARATION_STAMP, RESOURCES_MANIFEST,
+    resources_at, resources_for_game, resources_owner, resources_owner_in, set_prepare_step,
+    with_java, MinecraftFrom, PrepareStep, Unprepared, PREPARATION_STAMP, RESOURCES_MANIFEST,
 };
 use crate::backend::{
     data_dir, fetch_bytes_cancellable, game_version, installed_in, installed_resources_owner,
@@ -359,7 +359,10 @@ pub(crate) fn complete_reports_at(versions: &Path, tag: &str, target: &Path, to:
     let reports = |dir: &Path| dir.join(".local/datagen/out/reports");
     let mut sources = vec![reports(target)];
     let mut source_claims = Vec::new();
-    for other in installed_in(versions).into_iter().filter(|t| t != tag) {
+    for other in installed_in(versions)
+        .into_iter()
+        .filter(|t| t != tag && resources_owner_in(versions, t) == *t)
+    {
         let dir = versions.join(&other);
         if server(&dir).as_ref() == Some(&pins) {
             if let Ok(preparation) = prepare_lock_at(&dir, &other) {
@@ -569,4 +572,12 @@ pub(in crate::backend) fn finish_preparation_cancellable(
     stop: Option<&crate::native_mods::Cancellation>,
 ) -> Result<(), String> {
     Resources::prepare_cancellable(&resources_owner(tag), preparation, None, stop).map(drop)
+}
+
+pub(in crate::backend) fn finish_preparation_with_missing(
+    tag: &str,
+    preparation: &crate::preparer::Preparation,
+    missing: Option<crate::preparer::Extras>,
+) -> Result<(), String> {
+    Resources::prepare_with_missing(&resources_owner(tag), preparation, None, missing).map(drop)
 }

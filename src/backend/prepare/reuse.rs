@@ -1,9 +1,10 @@
 //! Reusing another build's prepared output instead of preparing again.
 use super::{
-    check_play_resources, check_prepared, complete_assets_staged, complete_reports,
-    finish_preparation, finish_preparation_cancellable, forget_prepared, has_runtime_reports,
-    probe_missing_extras, refill_own_store, resources, resources_at, resources_compatible,
-    resources_owner, resources_owner_in, LEGACY_OUTPUT_VERSIONS, RESOURCES_MANIFEST,
+    check_play_resources, check_prepared, complete_assets_lacking_staged, complete_reports,
+    finish_preparation_cancellable, finish_preparation_with_missing, forget_prepared,
+    has_runtime_reports, probe_missing_extras, refill_own_store, resources, resources_at,
+    resources_compatible, resources_owner, resources_owner_in, LEGACY_OUTPUT_VERSIONS,
+    RESOURCES_MANIFEST,
 };
 use crate::backend::{
     game_version_at, installed_in, prepare_lock, prepare_lock_at, version_dir, versions_dir,
@@ -200,11 +201,11 @@ pub fn reuse_prepared_everywhere() -> Vec<(String, String)> {
         let handoff = preparation.handoff(None);
         refill_own_store(&tag, missing.as_ref());
         if was_reused {
-            if let Err(error) = finish_preparation(&tag, &preparation) {
+            if let Err(error) = finish_preparation_with_missing(&tag, &preparation, missing) {
                 eprintln!("{tag}: {error}");
             }
-        } else {
-            complete_assets_staged(&tag, &handoff);
+        } else if let Some(lacking) = missing {
+            complete_assets_lacking_staged(&tag, &handoff, lacking);
         }
     }
     reused

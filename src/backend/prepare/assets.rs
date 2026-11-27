@@ -33,6 +33,21 @@ pub(crate) fn complete_assets_staged(tag: &str, handoff: &crate::preparer::Hando
     );
 }
 
+pub(crate) fn complete_assets_lacking_staged(
+    tag: &str,
+    handoff: &crate::preparer::Handoff<'_>,
+    lacking: crate::preparer::Extras,
+) {
+    complete_assets_with(
+        &versions_dir(),
+        tag,
+        Some(lacking),
+        minecraft_folders,
+        &|line| eprintln!("{line}"),
+        Some(handoff),
+    );
+}
+
 /// Whether Sunrise's own store is asked to download again: it has an asset index, the version
 /// lacks some extra (any kind: the download fetches the whole asset index, which holds the
 /// sounds, languages, fonts, panorama and built-in packs) and it was not asked this run yet.
@@ -100,6 +115,17 @@ pub(in crate::backend) fn complete_assets_in(
     log: &dyn Fn(String),
     handoff: Option<&crate::preparer::Handoff<'_>>,
 ) {
+    complete_assets_with(versions, tag, None, folders, log, handoff);
+}
+
+fn complete_assets_with(
+    versions: &Path,
+    tag: &str,
+    probed: Option<crate::preparer::Extras>,
+    folders: impl Fn() -> Vec<PathBuf>,
+    log: &dyn Fn(String),
+    handoff: Option<&crate::preparer::Handoff<'_>>,
+) {
     let stopped = || {
         handoff
             .and_then(crate::preparer::Handoff::stop)
@@ -119,10 +145,14 @@ pub(in crate::backend) fn complete_assets_in(
     let Some(binary) = crate::preparer::binary(&root) else {
         return;
     };
-    let lacking = match crate::preparer::missing_extras(&binary, &root, &resources, handoff) {
-        Ok(Some(lacking)) if !lacking.is_empty() => lacking,
-        Ok(_) => return,
-        Err(e) => return log(format!("{tag}: {e}")),
+    let lacking = match probed {
+        Some(lacking) if !lacking.is_empty() => lacking,
+        Some(_) => return,
+        None => match crate::preparer::missing_extras(&binary, &root, &resources, handoff) {
+            Ok(Some(lacking)) if !lacking.is_empty() => lacking,
+            Ok(_) => return,
+            Err(e) => return log(format!("{tag}: {e}")),
+        },
     };
     if stopped() {
         return;
