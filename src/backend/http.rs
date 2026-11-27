@@ -3,6 +3,8 @@
 use super::VERSION;
 use std::io::Read;
 
+pub(super) const DOWNLOAD_JOBS: usize = 8;
+
 pub(crate) const CLIENT: &str = if cfg!(windows) {
     "sunrise-client.exe"
 } else {
@@ -18,6 +20,7 @@ pub(crate) fn agent(url: &str) -> Result<ureq::Agent, String> {
             // A connection that goes quiet fails instead of waiting for ever.
             .timeout_connect(std::time::Duration::from_secs(15))
             .timeout_read(std::time::Duration::from_secs(60))
+            .max_idle_connections_per_host(DOWNLOAD_JOBS)
     })
 }
 
@@ -125,3 +128,6 @@ pub(super) fn fetch_bytes_cancellable(
     }
     Ok(body)
 }
+
+#[cfg(test)]
+mod tests;

@@ -353,7 +353,7 @@ pub(in crate::backend) fn download_for(
                 sources::Os::MacOs => "osx",
                 sources::Os::Windows => "windows",
             };
-            mojang::download(pins, dir, os, 8, fetch, cancel, log).map_err(|e| {
+            mojang::download(pins, dir, os, crate::backend::http::DOWNLOAD_JOBS, fetch, cancel, log).map_err(|e| {
                 format!("\n  • Sunrise tried to download {v} from Mojang for {name}, but: {e}")
             })
         }

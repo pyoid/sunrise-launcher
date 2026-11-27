@@ -298,6 +298,7 @@ impl Launcher {
                     }
                 }
                 if job == Job::Prepare {
+                    sunrise_launcher::game_log::launcher::prepare_line(&line);
                     self.follow_switch_preparation();
                 }
                 // The MCP server keeps its own server's log; the launcher's are the preparer's

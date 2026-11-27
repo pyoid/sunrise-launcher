@@ -196,6 +196,14 @@ pub fn line(text: impl AsRef<str>) {
     }
 }
 
+/// Preparation progress is public enough to share after scrubbing, except for older
+/// games' raw session lines, which are never forwarded to the window or log.
+pub fn prepare_line(text: &str) {
+    if !text.contains("Session ID is") {
+        line(format!("Preparing: {text}"));
+    }
+}
+
 /// A long step. Logs "{what}: started" now; `done` logs "{what}: done in {duration}{: detail}",
 /// `failed` logs "{what}: failed after {duration}: {why}", and a Step dropped without either
 /// logs "{what}: ended after {duration} with no result". Duration as "850 ms" under a second,

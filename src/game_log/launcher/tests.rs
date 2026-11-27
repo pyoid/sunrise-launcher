@@ -137,3 +137,21 @@ fn a_term_registered_after_the_write_is_scrubbed_on_read() {
     assert!(saved.contains(WORLD));
     assert!(scrub(saved).contains("Late world test: <private>"));
 }
+
+#[test]
+fn a_preparation_line_is_logged_without_the_players_name() {
+    hide("Steve_Prepare");
+    let before = since(0).0;
+    prepare_line("12 of 4000 files for Steve_Prepare");
+    prepare_line("Session ID is legacy-preparation-credential");
+    let (_, lines) = since(before);
+    let found: Vec<&String> = lines
+        .iter()
+        .filter(|line| line.contains("Preparing: 12 of 4000 files"))
+        .collect();
+    assert_eq!(found.len(), 1, "{lines:?}");
+    assert!(!found[0].contains("Steve_Prepare"), "{found:?}");
+    assert!(!lines
+        .iter()
+        .any(|line| line.contains("legacy-preparation-credential")));
+}

@@ -38,7 +38,7 @@ pub(in crate::backend) fn java(
         }
         let fetch = |url: &str| -> Result<Vec<u8>, String> { fetch_bytes_cancellable(url, stop) };
         let runtime = data_dir().join("minecraft").join("runtime");
-        mojang::java_runtime(component, &runtime, 8, &fetch, cancel, log).map_err(|e| {
+        mojang::java_runtime(component, &runtime, crate::backend::http::DOWNLOAD_JOBS, &fetch, cancel, log).map_err(|e| {
             crate::i18n::trf("{missing}\n  • Sunrise also tried to download Minecraft's own Java from Mojang, but: {error}", &[("missing", missing), ("error", &e.to_string())])
         })
     })
