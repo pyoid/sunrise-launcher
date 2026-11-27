@@ -316,6 +316,8 @@ fn add(
 
 impl Storage {
     fn entries(&self) -> Result<Vec<Entry>, Error> {
+        #[cfg(test)]
+        ENTRIES.with(|calls| calls.set(calls.get() + 1));
         let mut entries = Vec::new();
         let build_root = Root::open(&self.root)?;
         for cache in BUILD_CACHES {
@@ -487,36 +489,56 @@ impl Storage {
     }
 
     pub(super) fn stamp_build(&self) -> Result<(), Error> {
-        for entry in self.entries()? {
-            if !entry.path.starts_with(&self.root) || !entry.path.is_dir() {
-                continue;
+        use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+        let root = Root::open(&self.root)?;
+        let Some(directory) = root.directory.as_deref() else {
+            return Ok(());
+        };
+        let mut options = cap_std::fs::OpenOptions::new();
+        options
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .follow(FollowSymlinks::No);
+        let stamp = |parent: &Dir, name: &std::ffi::OsStr| -> Result<(), Error> {
+            parent
+                .open_dir_nofollow(name)?
+                .open_with(".last-used", &options)?;
+            Ok(())
+        };
+        for cache in [BuildCache::Cargo, BuildCache::Scratch] {
+            let name = cache.relative();
+            let path = self.root.join(name);
+            match fs::symlink_metadata(&path) {
+                Ok(meta) if linked(&meta) => return Err(Error::Unsafe(path)),
+                Ok(meta) if meta.is_dir() => stamp(directory, name.as_ref())?,
+                Ok(_) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => return Err(error.into()),
             }
-            let relative = entry.path.strip_prefix(&self.root).unwrap();
-            if !(relative == Path::new("cargo")
-                || relative == Path::new("tmp")
-                || (relative.starts_with("rust")
-                    && entry.path.file_name().is_some_and(|name| {
-                        name.to_string_lossy()
-                            .starts_with(crate::rust_toolchain::VERSION)
-                    })))
-            {
-                continue;
+        }
+        let rust = BuildCache::Rust.relative();
+        let path = self.root.join(rust);
+        if checked(&path, true)?.is_some() {
+            let directory = directory.open_dir_nofollow(rust)?;
+            for entry in directory.entries()? {
+                let name = entry?.file_name();
+                if usage_stamp(Path::new(&name)) {
+                    continue;
+                }
+                let child = path.join(&name);
+                let meta = fs::symlink_metadata(&child)?;
+                if linked(&meta) {
+                    return Err(Error::Unsafe(child));
+                }
+                if meta.is_dir()
+                    && name
+                        .to_string_lossy()
+                        .starts_with(crate::rust_toolchain::VERSION)
+                {
+                    stamp(&directory, &name)?;
+                }
             }
-            let Some(root) = &entry.directory else {
-                continue;
-            };
-            let mut directory = root.try_clone()?;
-            for part in entry.relative.components() {
-                directory = directory.open_dir_nofollow(part.as_os_str())?;
-            }
-            use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
-            let mut options = cap_std::fs::OpenOptions::new();
-            options
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .follow(FollowSymlinks::No);
-            directory.open_with(".last-used", &options)?;
         }
         Ok(())
     }
@@ -1397,5 +1419,71 @@ mod eviction_tests {
             .iter()
             .any(|kept| kept.bytes >= 4 * (1 << 30) && !kept.reason.is_empty())));
         assert!(matches!(Cache::acquire(&home.0), Err(Error::Busy)));
+    }
+
+    #[test]
+    fn build_stamps_match_the_former_inventory_selection_without_walking_it() {
+        let home = crate::storage::tests::Home::new();
+        let version = crate::rust_toolchain::VERSION;
+        let stamped = [
+            "cargo".to_owned(),
+            "tmp".to_owned(),
+            format!("rust/{version}-x86_64-unknown-linux-gnu"),
+            format!("rust/{version}-aarch64-apple-darwin"),
+        ];
+        for folder in &stamped {
+            fs::create_dir_all(home.0.join(folder)).unwrap();
+        }
+        home.seed("rust/1.0.0-old/payload");
+        home.seed(&format!("rust/{version}-not-a-dir"));
+        home.seed("native/source/0123456789abcdef0123456789abcdef01234567/payload");
+        home.seed(".test-game/instances/demo/.sunrise-cache/payload");
+        let storage = Storage::at(&home.0).unwrap();
+
+        let before = (walks(), entries_calls());
+        storage.stamp_build().unwrap();
+        assert_eq!((walks(), entries_calls()), before);
+
+        fn collect(folder: &Path, stamps: &mut HashSet<PathBuf>) {
+            for entry in fs::read_dir(folder).unwrap() {
+                let entry = entry.unwrap();
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    collect(&entry.path(), stamps);
+                } else if entry.file_name() == ".last-used" {
+                    stamps.insert(entry.path());
+                }
+            }
+        }
+        let mut stamps = HashSet::new();
+        collect(&home.0, &mut stamps);
+        assert_eq!(
+            stamps,
+            stamped
+                .map(|folder| home.0.join(folder).join(".last-used"))
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_stamps_refuse_linked_cache_roots_and_toolchains() {
+        use std::os::unix::fs::symlink;
+        for relative in [
+            "cargo",
+            "tmp",
+            "rust",
+            &format!("rust/{}-link", crate::rust_toolchain::VERSION),
+        ] {
+            let home = crate::storage::tests::Home::new();
+            let outside = crate::storage::tests::Home::new();
+            let path = home.0.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            symlink(&outside.0, &path).unwrap();
+            let storage = Storage::at(&home.0).unwrap();
+            assert!(matches!(storage.stamp_build(), Err(Error::Unsafe(link)) if link == path));
+            assert!(!outside.0.join(".last-used").exists());
+        }
     }
 }
