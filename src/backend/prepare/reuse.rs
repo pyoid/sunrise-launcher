@@ -1,9 +1,9 @@
 //! Reusing another build's prepared output instead of preparing again.
 use super::{
     check_play_resources, check_prepared, complete_assets_staged, complete_reports,
-    finish_preparation, finish_preparation_cancellable, forget_prepared, refill_own_store,
-    resources, resources_at, resources_compatible, resources_owner, resources_owner_in,
-    LEGACY_OUTPUT_VERSIONS, RESOURCES_MANIFEST,
+    finish_preparation, finish_preparation_cancellable, forget_prepared, has_runtime_reports,
+    probe_missing_extras, refill_own_store, resources, resources_at, resources_compatible,
+    resources_owner, resources_owner_in, LEGACY_OUTPUT_VERSIONS, RESOURCES_MANIFEST,
 };
 use crate::backend::{
     game_version_at, installed_in, prepare_lock, prepare_lock_at, version_dir, versions_dir,
@@ -186,14 +186,20 @@ pub fn reuse_prepared_everywhere() -> Vec<(String, String)> {
         .into_iter()
         .filter(|tag| resources_owner(tag) == *tag)
     {
+        let was_reused = reused.iter().any(|(prepared, _)| prepared == &tag);
+        // Probe unlocked once; lock only when this base was reused or actually lacks extras.
+        let missing = probe_missing_extras(&versions, &tag);
+        if !was_reused && missing.as_ref().is_none_or(Vec::is_empty) {
+            continue;
+        }
         // Here, on the start-up thread, and not in `complete_assets`, which Play also runs: a
         // download of thousands of files is not for the moment the game is waited for.
         let Ok(preparation) = prepare_lock(&tag) else {
             continue;
         };
         let handoff = preparation.handoff(None);
-        refill_own_store(&tag, &handoff);
-        if reused.iter().any(|(prepared, _)| prepared == &tag) {
+        refill_own_store(&tag, missing.as_ref());
+        if was_reused {
             if let Err(error) = finish_preparation(&tag, &preparation) {
                 eprintln!("{tag}: {error}");
             }
@@ -210,7 +216,12 @@ pub(in crate::backend) fn reuse_prepared_in(versions: &Path) -> Vec<(String, Str
     tags.into_iter()
         .filter(|tag| resources_owner_in(versions, tag) == *tag)
         .filter_map(|tag| {
-            let _preparation = prepare_lock_at(&versions.join(&tag), &tag).ok()?;
+            let target = versions.join(&tag);
+            let to = resources_at(&target);
+            if to.join(RESOURCES_MANIFEST).exists() && has_runtime_reports(&to) {
+                return None;
+            }
+            let _preparation = prepare_lock_at(&target, &tag).ok()?;
             let from = reuse_prepared(versions, &tag);
             complete_reports(versions, &tag);
             from.map(|from| (tag, from))

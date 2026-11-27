@@ -318,6 +318,12 @@ pub(in crate::backend) const PREPARER_CRATE: &str = "crates/sunrise-prepare";
 /// (without them no server can be joined or hosted) and the command tree.
 pub(in crate::backend) const RUNTIME_REPORTS: [&str; 2] = ["registries.json", "commands.json"];
 
+pub(in crate::backend) fn has_runtime_reports(resources: &Path) -> bool {
+    RUNTIME_REPORTS
+        .iter()
+        .all(|name| resources.join(name).is_file())
+}
+
 /// Puts the data generator reports the game reads at run time (`RUNTIME_REPORTS`) into a prepared version's
 /// resources when they are missing. Preparers before they shipped there left them only in the
 /// scratch output of the version that ran the data generator (`.local/datagen/out/reports`),

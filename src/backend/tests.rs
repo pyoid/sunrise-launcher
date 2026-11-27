@@ -3326,3 +3326,128 @@ fn reuse_prepared_skips_native_builds_without_creating_local_or_resealing_base()
     );
     assert!(reuse_prepared_in(donor_versions).is_empty());
 }
+
+#[test]
+fn startup_does_not_lock_or_write_a_complete_base_even_while_preparing_lock_is_held() {
+    const CHILD: &str = "SUNRISE_STARTUP_LOCKED_BASE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let home = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "backend::tests::startup_does_not_lock_or_write_a_complete_base_even_while_preparing_lock_is_held",
+            ])
+            .env(CHILD, "1")
+            .env("SUNRISE_LAUNCHER_HOME", home.path().join("launcher"))
+            .env("SUNRISE_HOME", home.path().join("game"))
+            .env("XDG_DATA_HOME", home.path().join("xdg-data"))
+            .env("XDG_CONFIG_HOME", home.path().join("xdg-config"))
+            .env("SUNRISE_LAUNCHER_LOCATION_FILE", home.path().join("location"))
+            .env("SUNRISE_LAUNCHER_TRASH", home.path().join("trash"))
+            .env("SUNRISE_LAUNCHER_CLIPBOARD", home.path().join("clipboard"))
+            .env("SUNRISE_LAUNCHER_DESKTOP", home.path().join("desktop"))
+            .env("SUNRISE_LAUNCHER_NO_SELF_UPDATE", "1")
+            .env("SUNRISE_NO_AUDIO", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+
+    let base = "dev-2026-11-26-ba1f24e";
+    let dir = version_dir(base);
+    let write = |path: &str, text: &str| {
+        let path = dir.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    };
+    write(COMPLETE, "");
+    write(
+        "research-lock.json",
+        r#"{"minecraft":{"version":"26.3","client_sha1":"c","server_sha1":"s"}}"#,
+    );
+    write("crates/sunrise-prepare/Cargo.toml", "[package]");
+    write("crates/sunrise-prepare/build.rs", "fn main() {}");
+    write(
+        "crates/sunrise-prepare/src/lib.rs",
+        "pub const OUTPUT_VERSION: u32 = 1;\n",
+    );
+    write(
+        &format!(".local/sunrise-client/26.3/{RESOURCES_MANIFEST}"),
+        "{}",
+    );
+    write(
+        &format!(".local/sunrise-client/26.3/{PREPARATION_STAMP}"),
+        r#"{"output_version":1}"#,
+    );
+    for report in RUNTIME_REPORTS {
+        write(&format!(".local/sunrise-client/26.3/{report}"), "{}");
+    }
+    {
+        let preparation = prepare_lock(base).unwrap();
+        crate::managed_play::Resources::prepare(base, &preparation, None).unwrap();
+    }
+    let receipt = dir.join(".local/launcher-prepared/current.json");
+    let receipt_bytes = fs::read(&receipt).unwrap();
+    let old_mtime = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&receipt)
+        .unwrap()
+        .set_modified(old_mtime)
+        .unwrap();
+    let stamped_mtime = fs::metadata(&receipt).unwrap().modified().unwrap();
+
+    #[cfg(unix)]
+    let (probe_log, mutated_marker) = {
+        use std::os::unix::fs::PermissionsExt;
+        let probe_log = data_dir().join("probe.log");
+        let mutated = data_dir().join("mutated");
+        let binary = dir.join(crate::preparer::BINARY);
+        fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nset -eu\ncmd=$1\nprintf '%s\\n' \"$cmd\" >> \"{}\"\nif [ \"$cmd\" = missing-extras ]; then\n  printf '%s\\n' '{{\"format\":1,\"missing\":[]}}'\nelse\n  : > \"{}\"\n  exit 2\nfi\n",
+                probe_log.display(),
+                mutated.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        (probe_log, mutated)
+    };
+
+    let held = prepare_lock(base).unwrap();
+    let before = (crate::storage::walks(), crate::storage::entries_calls());
+    let reused = reuse_prepared_everywhere();
+    assert!(reused.is_empty(), "{reused:?}");
+    assert_eq!(fs::read(&receipt).unwrap(), receipt_bytes);
+    assert_eq!(
+        fs::metadata(&receipt).unwrap().modified().unwrap(),
+        stamped_mtime
+    );
+    assert_eq!(
+        (crate::storage::walks(), crate::storage::entries_calls()),
+        before
+    );
+    #[cfg(unix)]
+    {
+        assert!(
+            !mutated_marker.exists(),
+            "startup ran a mutating preparer step"
+        );
+        assert_eq!(
+            fs::read_to_string(&probe_log)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            ["missing-extras"],
+            "Pass 2 should probe missing-extras once, unlocked"
+        );
+    }
+    // need_prepared keeps its non-blocking probe while a real writer holds .preparing.lock.
+    let error = need_prepared(base).unwrap_err();
+    assert!(error.contains("already being prepared"), "{error}");
+    drop(held);
+    need_prepared(base).unwrap();
+}
