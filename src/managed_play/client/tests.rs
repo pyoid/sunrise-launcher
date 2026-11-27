@@ -904,3 +904,25 @@ fn windows_bound_x64_fallback_survives_pending_retry_and_committed_replay() {
     );
     assert_eq!(reopened.active().unwrap(), Some(active));
 }
+
+/// #542: the session file is written last, inside the account check that runs after every
+/// start-up check (the hash of the prepared resources) and just before the spawn: the game
+/// refuses a session file older than two minutes.
+#[test]
+fn the_session_is_made_after_the_start_up_checks_just_before_the_spawn() {
+    let client = include_str!("../client.rs");
+    let start = &client[client.find("fn start_with_recovery").unwrap()..];
+    let spawn = start.find("spawn_checked_account(").unwrap();
+    let session = start.find("session_for_game_accepted(").unwrap();
+    assert!(
+        session > spawn,
+        "the session is made inside the spawn's account check"
+    );
+    let game = include_str!("../game.rs");
+    let selected = &game[game.find("fn spawn_selected").unwrap()..];
+    let handoff = selected.find("verified_handoff(").unwrap();
+    let leases = selected.find("ChildLeases::acquire").unwrap();
+    let check = selected.find("check_account(&mut command)").unwrap();
+    let spawn = selected.find("spawn_game(").unwrap();
+    assert!(handoff < leases && leases < check && check < spawn);
+}
