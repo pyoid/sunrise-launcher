@@ -1,21 +1,40 @@
 //! A mod author's discovery and registry lock through the mod's SDK tool (`native-discover`, `native-lock`), with the launcher's managed Rust and native cache.
-use super::{root, rust_toolchain, tool};
+use super::{root, rust_toolchain, tool, Cancellation};
+use crate::rust_toolchain::Toolchain;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 /// Runs the tool for the mod in `folder` on `command` with `plan` plus the work folder, the toolchain and the mod.
-fn ask(folder: &Path, command: &str, mut plan: Value) -> Result<Value, String> {
+fn ask(folder: &Path, command: &str, plan: Value) -> Result<Value, String> {
     let rust = rust_toolchain::install(|_| {})?;
     let program = super::tool_for(folder)?;
-    plan["work"] = json!(root());
-    plan["toolchain"] = tool::toolchain(&rust);
-    plan["mods"] = json!(folder);
-    tool::ask(
-        tool::command(&rust, &program),
+    run(
+        &program,
+        &rust,
+        &root(),
+        folder,
         command,
-        &plan,
-        &super::Cancellation::default(),
+        plan,
+        &Cancellation::default(),
     )
+    .map_err(String::from)
+}
+
+/// Runs `program` on `command` for the mod in `folder`, with `plan` plus `work` (the tool's own folder), the toolchain and the mod.
+pub(super) fn run(
+    program: &Path,
+    rust: &Toolchain,
+    work: &Path,
+    folder: &Path,
+    command: &str,
+    mut plan: Value,
+    cancellation: &Cancellation,
+) -> Result<Value, super::Failed> {
+    plan["work"] = json!(work);
+    plan["toolchain"] = tool::toolchain(rust);
+    plan["mods"] = json!(folder);
+    tool::ask(tool::command(rust, program), command, &plan, cancellation)
+        .map_err(super::Failed::Other)
 }
 
 /// The internals the mod in `folder` names, as the pinned game's catalog lists them (the tool's JSON).

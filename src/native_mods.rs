@@ -2109,6 +2109,24 @@ fn pipeline(
         }
         let game = workspace.package(game).map_err(|e| e.to_string())?;
         let work = workspace.work();
+        // A package carries the registry lock `cargo sunrise-mod build` wrote; a source folder may
+        // have none yet. It gets the lock `native-lock` writes, from this build's tool and with
+        // the same kept game lock, which runs none of the mod's code. The author's folder is
+        // never written to.
+        for bundle in &mods {
+            let copy = compiled.join(&bundle.manifest.id);
+            if !copy.join("Cargo.lock").exists() {
+                internals_sync::run(
+                    program,
+                    &rust,
+                    &root(),
+                    &copy,
+                    "native-lock",
+                    serde_json::json!({"update": false}),
+                    cancellation,
+                )?;
+            }
+        }
         // The libraries an earlier build of these mods kept (`kept`), copied in so the tool
         // compiles only the mods whose own inputs changed. Without them, every mod compiles.
         let seeding = std::time::Instant::now();
