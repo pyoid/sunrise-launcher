@@ -162,7 +162,8 @@ enum Cmd {
         #[arg(long)]
         accept_eula: bool,
     },
-    /// Show disposable storage by category as JSON. Builds must be idle
+    /// Show disposable storage by category as JSON. Builds must be idle. Native builds do not
+    /// evict caches on exit; reclaim disk with `storage --clear all` or a desktop launcher pass
     ///
     /// Rust/Cargo/temp build-tool caches remain clearable. Game-accessible caches, installed-version
     /// removal and automatic runtime eviction retain files while any launch path lacks enforceable
@@ -185,7 +186,8 @@ enum Cmd {
     /// Native mods (docs/modding/src/how-to/native-mods.md): compile flat Rust mod projects against the profile's exact
     /// Sunrise source revision with the launcher's own Rust, as the version the profile then
     /// plays. Not sandboxed: the mods' code runs with your rights. If there are no native mods to build, it exits successfully; a
-    /// server export still fails, as no engine is made
+    /// server export still fails, as no engine is made. Builds stamp shared caches without evicting
+    /// on exit; reclaim disk with `storage --clear all` or a desktop launcher pass
     NativeBuild(native::NativeBuildArgs),
     /// Show a release's patch notes (default: the newest)
     Notes { tag: Option<String> },

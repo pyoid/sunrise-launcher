@@ -3,39 +3,56 @@ use super::*;
 
 impl Storage {
     pub(in crate::storage) fn stamp_build(&self) -> Result<(), Error> {
-        for entry in self.entries()? {
-            if !entry.path.starts_with(&self.root) || !entry.path.is_dir() {
-                continue;
+        use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+        let root = Root::open(&self.root)?;
+        let Some(directory) = root.directory.as_deref() else {
+            return Ok(());
+        };
+        let mut options = cap_std::fs::OpenOptions::new();
+        options
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .follow(FollowSymlinks::No);
+        let stamp = |parent: &Dir, name: &std::ffi::OsStr| -> Result<(), Error> {
+            parent
+                .open_dir_nofollow(name)?
+                .open_with(".last-used", &options)?;
+            Ok(())
+        };
+        for cache in [BuildCache::Cargo, BuildCache::Scratch] {
+            let name = cache.relative();
+            let path = self.root.join(name);
+            match fs::symlink_metadata(&path) {
+                Ok(meta) if linked(&meta) => return Err(Error::Unsafe(path)),
+                Ok(meta) if meta.is_dir() => stamp(directory, name.as_ref())?,
+                Ok(_) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => return Err(error.into()),
             }
-            let relative = entry
-                .path
-                .strip_prefix(&self.root)
-                .expect("checked to start with the root just above");
-            if !(relative == Path::new("cargo")
-                || relative == Path::new("tmp")
-                || (relative.starts_with("rust")
-                    && entry.path.file_name().is_some_and(|name| {
-                        name.to_string_lossy()
-                            .starts_with(crate::rust_toolchain::VERSION)
-                    })))
-            {
-                continue;
+        }
+        let rust = BuildCache::Rust.relative();
+        let path = self.root.join(rust);
+        if checked(&path, true)?.is_some() {
+            let directory = directory.open_dir_nofollow(rust)?;
+            for entry in directory.entries()? {
+                let name = entry?.file_name();
+                if usage_stamp(Path::new(&name)) {
+                    continue;
+                }
+                let child = path.join(&name);
+                let meta = fs::symlink_metadata(&child)?;
+                if linked(&meta) {
+                    return Err(Error::Unsafe(child));
+                }
+                if meta.is_dir()
+                    && name
+                        .to_string_lossy()
+                        .starts_with(crate::rust_toolchain::VERSION)
+                {
+                    stamp(&directory, &name)?;
+                }
             }
-            let Some(root) = &entry.directory else {
-                continue;
-            };
-            let mut directory = root.try_clone()?;
-            for part in entry.relative.components() {
-                directory = directory.open_dir_nofollow(part.as_os_str())?;
-            }
-            use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
-            let mut options = cap_std::fs::OpenOptions::new();
-            options
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .follow(FollowSymlinks::No);
-            directory.open_with(".last-used", &options)?;
         }
         Ok(())
     }

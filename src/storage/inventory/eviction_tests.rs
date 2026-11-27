@@ -428,3 +428,69 @@ fn allocated_forty_gib_cleanup_proof() {
         .any(|kept| kept.bytes >= 4 * (1 << 30) && !kept.reason.is_empty())));
     assert!(matches!(Cache::acquire(&home.0), Err(Error::Busy)));
 }
+
+#[test]
+fn build_stamps_match_the_former_inventory_selection_without_walking_it() {
+    let home = crate::storage::tests::Home::new();
+    let version = crate::rust_toolchain::VERSION;
+    let stamped = [
+        "cargo".to_owned(),
+        "tmp".to_owned(),
+        format!("rust/{version}-x86_64-unknown-linux-gnu"),
+        format!("rust/{version}-aarch64-apple-darwin"),
+    ];
+    for folder in &stamped {
+        fs::create_dir_all(home.0.join(folder)).unwrap();
+    }
+    home.seed("rust/1.0.0-old/payload");
+    home.seed(&format!("rust/{version}-not-a-dir"));
+    home.seed("native/source/0123456789abcdef0123456789abcdef01234567/payload");
+    home.seed(".test-game/instances/demo/.sunrise-cache/payload");
+    let storage = Storage::at(&home.0).unwrap();
+
+    let before = (walks(), entries_calls());
+    storage.stamp_build().unwrap();
+    assert_eq!((walks(), entries_calls()), before);
+
+    fn collect(folder: &Path, stamps: &mut HashSet<PathBuf>) {
+        for entry in fs::read_dir(folder).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                collect(&entry.path(), stamps);
+            } else if entry.file_name() == ".last-used" {
+                stamps.insert(entry.path());
+            }
+        }
+    }
+    let mut stamps = HashSet::new();
+    collect(&home.0, &mut stamps);
+    assert_eq!(
+        stamps,
+        stamped
+            .map(|folder| home.0.join(folder).join(".last-used"))
+            .into_iter()
+            .collect()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn build_stamps_refuse_linked_cache_roots_and_toolchains() {
+    use std::os::unix::fs::symlink;
+    for relative in [
+        "cargo",
+        "tmp",
+        "rust",
+        &format!("rust/{}-link", crate::rust_toolchain::VERSION),
+    ] {
+        let home = crate::storage::tests::Home::new();
+        let outside = crate::storage::tests::Home::new();
+        let path = home.0.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        symlink(&outside.0, &path).unwrap();
+        let storage = Storage::at(&home.0).unwrap();
+        assert!(matches!(storage.stamp_build(), Err(Error::Unsafe(link)) if link == path));
+        assert!(!outside.0.join(".last-used").exists());
+    }
+}
