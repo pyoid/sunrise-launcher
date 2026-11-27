@@ -22,6 +22,8 @@ pub(crate) struct Facts {
     pub starting: bool,
     /// The step the start is at, once it has said (`Main::Step`).
     pub step: Option<backend::PlayStep>,
+    /// Live detail line shown beside/under "Preparing…" while Play is working.
+    pub play_detail: Option<String>,
     /// Mods are being added, removed or updated.
     pub mutating: bool,
     pub registry: Option<InstallProgress>,
@@ -110,6 +112,8 @@ pub(crate) struct View {
     pub enabled: bool,
     /// One sentence beside Play: a problem, a held update, a newer build.
     pub said: Option<String>,
+    /// Live counted Play step detail shown in the reserved line above Play (never moves the Play row).
+    pub play_detail: Option<String>,
     /// That sentence is a problem.
     pub failed: bool,
     pub act: Option<Act>,
@@ -283,6 +287,10 @@ impl Facts {
             .as_ref()
             .filter(|_| !busy && !self.running);
         let failed = (recovery.is_some() || brief.is_some()) && !self.building;
+        let play_detail = self
+            .play_detail
+            .clone()
+            .filter(|_| busy && !self.building && !failed);
         let said = recovery
             .map(|_| tr("A mod install couldn't be finished.").into())
             .or(brief)
@@ -320,6 +328,7 @@ impl Facts {
                 busy && !matches!(main, Main::RegistryInstall(_, true)),
             ),
             said,
+            play_detail,
             failed,
             act,
             mods_off,
@@ -341,7 +350,7 @@ impl Main {
             Main::Step(backend::PlayStep::Assets) => tr("Checking game files…").into(),
             Main::Step(backend::PlayStep::Mods) => tr("Updating mods…").into(),
             Main::Step(backend::PlayStep::Download) => tr("Downloading the game…").into(),
-            Main::Step(backend::PlayStep::Prepare) => tr("Getting ready…").into(),
+            Main::Step(backend::PlayStep::Prepare) => tr("Preparing…").into(),
             Main::Step(backend::PlayStep::Native) => tr("Building mods…").into(),
             Main::Step(backend::PlayStep::SignIn) => tr("Signing in…").into(),
             Main::ChangingMods => tr("Changing mods…").into(),
@@ -423,7 +432,13 @@ impl View {
                 }
                 _ => StripAct::Home,
             };
-            return Some((self.main.label(), act));
+            return Some((
+                self.play_detail
+                    .clone()
+                    .map(Into::into)
+                    .unwrap_or_else(|| self.main.label()),
+                act,
+            ));
         }
         match (&self.said, &self.act) {
             (Some(said), Some(act @ (Act::BuildResult | Act::Notice { .. }))) if self.failed => {
@@ -468,6 +483,7 @@ impl Launcher {
             building: self.native_step.is_some(),
             starting: self.starting_client.is_some() || self.play_admission.is_some(),
             step: self.play_step,
+            play_detail: self.play_detail.clone(),
             mutating: self.mutating() || self.switch_busy(),
             registry: self.registry_stage(),
             registry_accepts_play: self.registry_accepts_play(),
@@ -550,18 +566,31 @@ impl Launcher {
     pub(crate) fn on_play_message(&mut self, msg: Msg, cx: &mut Context<Self>) {
         match msg {
             Msg::Playing(playing) => self.playing = playing,
+            Msg::PlayDetail(detail) => {
+                if self.starting_client.is_some() || self.preparing {
+                    self.play_detail = Some(detail);
+                }
+            }
             Msg::PlayDownload(fraction) => {
                 if self.starting_client.is_some() {
+                    if self.play_step != Some(backend::PlayStep::Download) {
+                        self.play_detail = None;
+                    }
                     self.play_step = Some(backend::PlayStep::Download);
                     self.play_download = Some(fraction);
                 }
             }
             Msg::PlayStep(step) => {
                 if self.starting_client.is_some() {
+                    if self.play_step != Some(step) {
+                        self.play_detail = None;
+                    }
                     self.play_step = Some(step);
                     self.play_download = None;
                 }
-                if step == backend::PlayStep::SignIn && self.native_step.take().is_some() {
+                if matches!(step, backend::PlayStep::Assets | backend::PlayStep::SignIn)
+                    && self.native_step.take().is_some()
+                {
                     self.native_progress = None;
                     if let Some(run) = &mut self.mods_state.build {
                         run.done();
@@ -643,6 +672,7 @@ impl Launcher {
                 }
                 self.starting_client = None;
                 self.play_step = None;
+                self.play_detail = None;
                 self.play_download = None;
                 self.accounts = Accounts::load();
                 self.load_auth_statuses(false);

@@ -39,6 +39,15 @@ pub(super) fn announce_play_step(
 }
 
 impl Launcher {
+    pub(crate) fn play_detail_sink(
+        tx: &std::sync::mpsc::Sender<Msg>,
+    ) -> sunrise_launcher::game_log::launcher::PlayDetailGuard {
+        let tx = tx.clone();
+        sunrise_launcher::game_log::launcher::on_play_detail(move |text| {
+            let _ = tx.send(Msg::PlayDetail(text));
+        })
+    }
+
     pub(super) fn refresh_installed(&mut self) {
         (self.installed, self.known_nightly) =
             backend::play_installations(self.settings.selected.as_deref());
@@ -131,6 +140,7 @@ impl Launcher {
                 | Msg::Installed(_, _)
                 | Msg::ConfirmUnreviewed(_, _) => self.on_install_message(msg),
                 Msg::Playing(_)
+                | Msg::PlayDetail(_)
                 | Msg::PlayStep(_)
                 | Msg::PlayDownload(_)
                 | Msg::ManagedBuild { .. }

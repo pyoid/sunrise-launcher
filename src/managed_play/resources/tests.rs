@@ -164,7 +164,7 @@ fn a_stopped_seal_returns_the_cancellation_and_leaves_no_snapshot() {
         assert_eq!(Some(error), stop.check().err());
         assert!(!parent(root).exists());
     }
-    let copying = copy_tree_with(&source, &root.join("copy"), true, 0, 2, Some(&stop));
+    let copying = copy_tree_with(&source, &root.join("copy"), true, 0, 2, Some(&stop), None);
     assert!(copying.is_err());
     let leftovers: Vec<_> = fs::read_dir(root.join(".local"))
         .unwrap()
@@ -182,7 +182,7 @@ fn a_link_found_while_copying_is_refused_and_every_worker_is_joined() {
     let link = source.join("assets/deep/link");
     std::os::unix::fs::symlink(source.join("assets/empty.txt"), &link).unwrap();
     for workers in [1, 2] {
-        let error = copy_tree_with(&source, &root.join("copy"), true, 0, workers, None)
+        let error = copy_tree_with(&source, &root.join("copy"), true, 0, workers, None, None)
             .err()
             .unwrap();
         assert_eq!(error.to_string(), setup_error(&link));
@@ -206,10 +206,37 @@ fn a_home_sealed_by_v1_3_4_is_selected_and_kept_without_sealing_again() {
     };
     let snapshot = sealed.path_at(root);
     fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
-    copy_tree_with(&source, &snapshot, true, 0, 1, None).unwrap();
+    copy_tree_with(&source, &snapshot, true, 0, 1, None, None).unwrap();
     write_receipt(&parent(root).join(CURRENT), &sealed).unwrap();
     assert_eq!(Resources::current(root).unwrap().as_ref(), Some(&sealed));
     assert_eq!(artifact::tree(&snapshot, true).unwrap(), Some(primary));
     let again = Resources::seal(root, &source, None, |_| panic!("sealed again")).unwrap();
     assert_eq!(again, sealed);
+}
+
+#[test]
+fn sealing_counts_all_three_parallel_passes_without_starting_over() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = nested_source(temp.path());
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let records = seen.clone();
+    let _sink = launcher_log::on_play_detail(move |detail| records.lock().unwrap().push(detail));
+    Resources::seal_with(temp.path(), &source, 2, None, |_| Ok(None)).unwrap();
+    let seen = seen.lock().unwrap();
+    let counts: Vec<_> = seen
+        .iter()
+        .filter_map(|line| line.strip_prefix("Sealing the game files: "))
+        .map(|line| line.split_once(" of ").unwrap())
+        .map(|(done, total)| {
+            (
+                done.parse::<usize>().unwrap(),
+                total.parse::<usize>().unwrap(),
+            )
+        })
+        .collect();
+    assert!(counts.len() >= 2, "{seen:?}");
+    assert!(matches!(counts[0], (1 | 2, 9)), "{seen:?}");
+    assert_eq!(counts.last(), Some(&(9, 9)));
+    assert!(counts.windows(2).all(|steps| steps[0].0 < steps[1].0));
+    assert!(counts.iter().all(|&(_, total)| total == 9));
 }

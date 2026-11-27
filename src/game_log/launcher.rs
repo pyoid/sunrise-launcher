@@ -1,6 +1,7 @@
 //! The launcher's own log: every line goes, scrubbed, to a rotating file in the logs folder and to
 //! an in-memory ring the Logs panel reads. Words in log lines are English: the log is for bug
 //! reports, not for the player to read in their language.
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -201,6 +202,99 @@ pub fn line(text: impl AsRef<str>) {
 pub fn prepare_line(text: &str) {
     if !text.contains("Session ID is") {
         line(format!("Preparing: {text}"));
+    }
+}
+
+type PlayDetailSink = std::sync::Arc<dyn Fn(String) + Send + Sync>;
+
+thread_local! {
+    static PLAY_DETAIL: RefCell<Option<PlayDetailSink>> = const { RefCell::new(None) };
+}
+
+/// The originating Play worker owns the sink. Meters created on it can report from any thread.
+pub struct PlayDetailGuard {
+    prev: Option<PlayDetailSink>,
+    _origin: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Drop for PlayDetailGuard {
+    fn drop(&mut self) {
+        PLAY_DETAIL.replace(self.prev.take());
+    }
+}
+
+pub fn on_play_detail(sink: impl Fn(String) + Send + Sync + 'static) -> PlayDetailGuard {
+    PlayDetailGuard {
+        prev: PLAY_DETAIL.replace(Some(Arc::new(sink))),
+        _origin: std::marker::PhantomData,
+    }
+}
+
+/// Sends a Play step line to the window (when a sink is installed) and to `launcher.log`.
+pub fn play_detail(text: impl Into<String>) {
+    let text = text.into();
+    line(&text);
+    play_detail_ui_only(text);
+}
+
+/// Sends a Play step line to the window without adding another `launcher.log` line.
+pub fn play_detail_ui_only(text: impl Into<String>) {
+    let text = text.into();
+    let sink = PLAY_DETAIL.with(|sink| sink.borrow().clone());
+    if let Some(sink) = sink {
+        sink(text);
+    }
+}
+
+/// Throttles per-file progress updates from parallel workers so the window updates every ~250 ms
+/// and `launcher.log` gets a line at most every ~2 s without flooding either.
+pub struct PlayMeter {
+    sink: Option<PlayDetailSink>,
+    format: fn(usize, usize) -> String,
+    state: Mutex<(Option<Instant>, Option<Instant>, usize)>,
+}
+
+impl PlayMeter {
+    pub fn new(format: fn(usize, usize) -> String) -> Self {
+        let sink = PLAY_DETAIL.with(|sink| sink.borrow().clone());
+        Self {
+            sink,
+            format,
+            state: Mutex::new((None, None, 0)),
+        }
+    }
+
+    pub fn tick(&self, done: usize, total: usize) {
+        if total == 0 {
+            return;
+        }
+        let now = Instant::now();
+        // Keep the count and its delivery ordered even when a worker is preempted.
+        let mut state = lock(&self.state);
+        let shown = done.min(total);
+        if shown <= state.2 {
+            return;
+        }
+        state.2 = shown;
+        let emit_ui = self.sink.is_some()
+            && (shown == total
+                || state.0.is_none_or(|t| {
+                    now.saturating_duration_since(t) >= Duration::from_millis(250)
+                }));
+        let emit_log = state
+            .1
+            .is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_secs(2));
+        if emit_ui || emit_log {
+            let text = (self.format)(shown, total);
+            if emit_log {
+                state.1 = Some(now);
+                line(&text);
+            }
+            if let Some(sink) = self.sink.as_ref().filter(|_| emit_ui) {
+                state.0 = Some(now);
+                sink(text);
+            }
+        }
     }
 }
 

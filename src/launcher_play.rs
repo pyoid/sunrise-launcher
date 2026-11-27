@@ -335,13 +335,16 @@ impl Launcher {
             .clone()
             .unwrap_or_else(|| sunrise_launcher::preparer::minecraft_dir(None));
         self.prepare_log.clear();
+        self.play_detail = None;
         self.prepare_error = None;
         self.prepare_log
             .push_back(crate::i18n::tr("Checking Java and your Minecraft install").into());
         let tx = self.tx.clone();
         // The checks may download the server jar, so they run on the thread too.
         std::thread::spawn(move || {
-            let log = |line| {
+            let _detail = Self::play_detail_sink(&tx);
+            let log = |line: String| {
+                sunrise_launcher::game_log::launcher::prepare_line(&line);
                 let _ = tx.send(Msg::Line(Job::Prepare, line));
             };
             let result = (|| {
@@ -457,11 +460,13 @@ impl Launcher {
         self.play_pressed = Some(Instant::now());
         self.starting_client = Some(target.clone().unwrap_or_default());
         self.play_step = Some(backend::PlayStep::Assets);
+        self.play_detail = None;
         self.play_download = None;
         let cancellation = native_mods::Cancellation::default();
         self.native_cancellation = Some(cancellation.clone());
         let tx = self.tx.clone();
         std::thread::spawn(move || {
+            let _detail = Self::play_detail_sink(&tx);
             let announced = std::cell::Cell::new(None);
             let result = Client {
                 instance: &instance,
@@ -553,6 +558,7 @@ impl Launcher {
         // session arrives.
         self.starting_client = Some(tag.clone());
         self.play_step = None;
+        self.play_detail = None;
         self.play_download = None;
         let accepted = intent.account.clone();
         self.play_pressed = Some(Instant::now());

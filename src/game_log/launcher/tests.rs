@@ -155,3 +155,69 @@ fn a_preparation_line_is_logged_without_the_players_name() {
         .iter()
         .any(|line| line.contains("legacy-preparation-credential")));
 }
+
+#[test]
+fn play_meter_reports_counted_steps_to_both_ui_and_log() {
+    let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink_seen = seen.clone();
+    let before = since(0).0;
+    let _guard = on_play_detail(move |text| {
+        lock(&sink_seen).push(text);
+    });
+    let meter = PlayMeter::new(|done, total| format!("Sealing test files: {done} of {total}"));
+    meter.tick(1, 100);
+    meter.tick(50, 100);
+    meter.tick(100, 100);
+    let ui: Vec<String> = lock(&seen)
+        .iter()
+        .filter(|l| l.starts_with("Sealing test files:"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        ui,
+        vec![
+            "Sealing test files: 1 of 100".to_string(),
+            "Sealing test files: 100 of 100".to_string(),
+        ]
+    );
+    let (_, lines) = since(before);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("Sealing test files: 1 of 100")),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn play_detail_from_spawned_thread_reaches_sink() {
+    let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink_seen = seen.clone();
+    let _guard = on_play_detail(move |text| {
+        lock(&sink_seen).push(text);
+    });
+    play_detail_ui_only("spawned-thread-test: Downloading Minecraft's files: 12 of 400");
+    let meter = PlayMeter::new(|done, total| {
+        format!("spawned-thread-test: Sealing worker files: {done} of {total}")
+    });
+    std::thread::spawn(move || {
+        meter.tick(1, 10);
+        meter.tick(10, 10);
+        meter.tick(6, 10); // A completed worker can report late.
+    })
+    .join()
+    .expect("worker thread joined");
+    let got: Vec<String> = lock(&seen)
+        .iter()
+        .filter(|l| l.starts_with("spawned-thread-test:"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            "spawned-thread-test: Downloading Minecraft's files: 12 of 400".to_string(),
+            "spawned-thread-test: Sealing worker files: 1 of 10".to_string(),
+            "spawned-thread-test: Sealing worker files: 10 of 10".to_string(),
+        ]
+    );
+}

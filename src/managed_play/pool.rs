@@ -54,10 +54,12 @@ pub(super) fn run<T: Sync, S, R: Send>(
     items: &[T],
     workers: usize,
     stop: Option<&Cancellation>,
+    on_done: Option<&(dyn Fn(usize, usize) + Sync)>,
     init: impl Fn() -> S + Sync,
     job: impl Fn(&mut S, &T) -> Result<R, Error> + Sync,
 ) -> Result<Vec<R>, Error> {
     let cursor = AtomicUsize::new(0);
+    let completed = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
     let first = Mutex::new(None::<Error>);
     let fail = |error: Error| {
@@ -80,7 +82,13 @@ pub(super) fn run<T: Sync, S, R: Send>(
                 break;
             };
             match job(&mut state, item) {
-                Ok(result) => done.push((at, result)),
+                Ok(result) => {
+                    done.push((at, result));
+                    if let Some(on_done) = on_done {
+                        let n = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        on_done(n, items.len());
+                    }
+                }
                 Err(error) => fail(error),
             }
         }

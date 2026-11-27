@@ -11,6 +11,7 @@ impl Launcher {
                 match job {
                     Job::Prepare => {
                         self.preparing = false;
+                        self.play_detail = None;
                         self.refresh_open_storage_builds();
                         // Play pressed before the version was prepared plays now.
                         if let Some((tag, intent)) = self.play_when_prepared.take() {
@@ -253,6 +254,7 @@ impl Launcher {
                     return;
                 }
                 self.play_step = None;
+                self.play_detail = None;
                 self.play_download = None;
                 for notice in &registry_notices {
                     console_page::keep_line(
@@ -298,7 +300,6 @@ impl Launcher {
                     }
                 }
                 if job == Job::Prepare {
-                    sunrise_launcher::game_log::launcher::prepare_line(&line);
                     self.follow_switch_preparation();
                 }
                 // The MCP server keeps its own server's log; the launcher's are the preparer's

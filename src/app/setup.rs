@@ -184,6 +184,7 @@ impl Launcher {
             owner: None,
             starting_client: None,
             play_step: None,
+            play_detail: None,
             play_download: None,
             starting_play: None,
             play_when_prepared: None,

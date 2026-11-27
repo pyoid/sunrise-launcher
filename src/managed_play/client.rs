@@ -338,7 +338,7 @@ impl Client<'_> {
                     Some(super::Resources::for_play(
                         old.base(),
                         profile.handoff(),
-                        &|line| progress(Progress::Line(line)),
+                        &|line| emit_prepare_line(&progress, line),
                     )?)
                 }
                 Err(issue) => return Err(issue.message(|| unsettled!()).into()),
@@ -369,7 +369,7 @@ impl Client<'_> {
             })?;
             check_build(first.base(), first.variant().as_ref())?;
             progress(Progress::Prepare);
-            first.prepare(&|line| progress(Progress::Line(line)))?;
+            first.prepare(&|line| emit_prepare_line(&progress, line))?;
             let (image, notices) = {
                 let _manifest = game_lock(&home)?;
                 super::recover_game_install(&home).map_err(StartError::Journal)?;
@@ -549,4 +549,10 @@ pub fn headless_first(instance: &instances::Instance) -> Result<FirstBuild, Stri
             .next()
     };
     FirstBuild::download(release.ok_or(installed)?)
+}
+
+/// Both the CLI and window receive the same preparation line, logged here only once.
+fn emit_prepare_line(progress: &impl Fn(Progress), line: String) {
+    crate::game_log::launcher::prepare_line(&line);
+    progress(Progress::Line(line));
 }

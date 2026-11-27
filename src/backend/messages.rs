@@ -81,6 +81,8 @@ pub enum Msg {
     Session(Result<Option<crate::account::GameSession>, crate::account::NoOwner>),
     /// The step Play is at before the game starts, for the button's label.
     PlayStep(PlayStep),
+    /// Counted work shown in the fixed Play detail line.
+    PlayDetail(String),
     /// How far Play's download of the game build is, for the status strip's row.
     PlayDownload(f32),
     ManagedBuild {

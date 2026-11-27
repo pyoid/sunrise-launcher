@@ -228,6 +228,16 @@ pub(super) fn tree_with_workers(
     workers: usize,
     stop: Option<&Cancellation>,
 ) -> Result<Option<([u8; 32], usize)>, super::pool::Error> {
+    tree_with_progress(path, resources, workers, stop, None)
+}
+
+pub(super) fn tree_with_progress(
+    path: &Path,
+    resources: bool,
+    workers: usize,
+    stop: Option<&Cancellation>,
+    on_done: Option<&(dyn Fn(usize, usize) + Sync)>,
+) -> Result<Option<([u8; 32], usize)>, super::pool::Error> {
     let device = match fs::symlink_metadata(path) {
         Ok(meta) if meta.is_dir() && plain_file(&meta) => {
             #[cfg(unix)]
@@ -250,6 +260,7 @@ pub(super) fn tree_with_workers(
         &files,
         workers,
         stop,
+        on_done,
         || vec![0u8; 64 * 1024],
         |buffer, file| digest_open(file, buffer),
     )?;

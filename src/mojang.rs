@@ -454,18 +454,29 @@ fn fetch_each(
                 })
             })
             .collect();
-        let mut waited = 0;
+        let mut waited = 0u32;
+        let mut last_ui_done = usize::MAX;
         while !workers.iter().all(|w| w.is_finished()) {
             std::thread::sleep(Duration::from_millis(100));
             waited += 1;
-            if waited % 10 == 0 {
-                log(trf(
-                    "{done} of {total} files",
+            let count = done.load(Relaxed);
+            let log_due = waited.is_multiple_of(10);
+            let ui_due = count != last_ui_done && (log_due || waited.is_multiple_of(3));
+            if log_due || ui_due {
+                let text = trf(
+                    "Downloading Minecraft's files: {done} of {total}",
                     &[
-                        ("done", &done.load(Relaxed).to_string()),
+                        ("done", &count.to_string()),
                         ("total", &files.len().to_string()),
                     ],
-                ));
+                );
+                if ui_due {
+                    last_ui_done = count;
+                    crate::game_log::launcher::play_detail_ui_only(text.clone());
+                }
+                if log_due {
+                    log(text);
+                }
             }
         }
     });
