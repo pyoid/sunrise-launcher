@@ -2,14 +2,14 @@ use super::*;
 use crate::storage::{entries_calls, walks};
 
 #[test]
-fn build_completion_stamps_without_inventory_on_every_outcome() {
+fn build_completion_walks_and_stamps_nothing_on_every_outcome() {
     const CHILD: &str = "SUNRISE_BUILD_COMPLETION_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let home = tempfile::tempdir().unwrap();
         let status = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "native_mods::tests::build_completion::build_completion_stamps_without_inventory_on_every_outcome",
+                "native_mods::tests::build_completion::build_completion_walks_and_stamps_nothing_on_every_outcome",
             ])
             .env(CHILD, "1")
             .env("SUNRISE_LAUNCHER_HOME", home.path().join("launcher"))
@@ -32,13 +32,15 @@ fn build_completion_stamps_without_inventory_on_every_outcome() {
     let toolchain = format!("rust/{}-fixture", crate::rust_toolchain::VERSION);
     let profile = instances::create("Stamp fixture", None).unwrap();
     let profile_cache = profile.home.join(".sunrise-cache");
-    let stamped = [home.join("cargo"), home.join("tmp"), home.join(toolchain)];
-    let untouched = [
+    let caches = [
+        home.join("cargo"),
+        home.join("tmp"),
+        home.join(toolchain),
         home.join("rust/old"),
         home.join("native/source"),
         profile_cache,
     ];
-    for path in stamped.iter().chain(&untouched) {
+    for path in &caches {
         fs::create_dir_all(path).unwrap();
         fs::write(path.join("payload"), b"keep").unwrap();
     }
@@ -81,10 +83,7 @@ fn build_completion_stamps_without_inventory_on_every_outcome() {
             instances::find(&profile.id).unwrap().version.as_deref(),
             Some(version)
         );
-        for path in &stamped {
-            fs::remove_file(path.join(".last-used")).unwrap();
-        }
-        for path in &untouched {
+        for path in &caches {
             assert_eq!(fs::read(path.join("payload")).unwrap(), b"keep");
             assert!(!path.join(".last-used").exists());
         }
