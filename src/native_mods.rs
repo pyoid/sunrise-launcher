@@ -243,16 +243,13 @@ pub fn is_native(version: &str) -> bool {
     version.starts_with(PREFIX)
 }
 
-/// Records the whole attempt, including selection or export after compilation. Then stamps
-/// shared caches under the lease; eviction belongs to desktop cleanup or `storage --clear`.
+/// Records the whole attempt, including selection or export after compilation, inside the build lease.
 fn logged<T, E: std::fmt::Display + From<String>>(
     cancellation: &Cancellation,
     waiting: &dyn Fn(),
     build: impl FnOnce(Result<&crate::native_cache::Cache, &str>) -> Result<T, E>,
 ) -> Result<T, E> {
-    logged_then(cancellation, waiting, build, |cache| {
-        crate::storage::eviction::after_build_logged(cache, log_warning)
-    })
+    logged_then(cancellation, waiting, build, |_| {})
 }
 
 /// The build lease on the build folder. While another build or a cache cleanup holds it, this
@@ -645,7 +642,7 @@ pub(crate) fn checked_about(version: &str) -> Result<Option<About>, String> {
 pub const RECORD: &str = "native-mods.json";
 
 /// The build record (`native-mods.json`) in version folder `dir`, if it parses.
-fn about_in(dir: &Path) -> Option<About> {
+pub(crate) fn about_in(dir: &Path) -> Option<About> {
     let json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(dir.join(RECORD)).ok()?).ok()?;
     let field = |name: &str| json[name].as_str().map(str::to_owned);
