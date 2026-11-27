@@ -5005,23 +5005,8 @@ impl RuntimeGuard {
 pub use crate::run_leases::control::startup_cleanup;
 
 pub fn prepare_command(cmd: Command) -> Result<(Command, RuntimeGuard), String> {
-    prepare_runtime(cmd, None)
-}
-
-pub(crate) fn prepare_managed_command(
-    cmd: Command,
-    resources: &Path,
-) -> Result<(Command, RuntimeGuard), String> {
-    prepare_runtime(cmd, Some(resources))
-}
-
-fn prepare_runtime(
-    cmd: Command,
-    read_only_resources: Option<&Path>,
-) -> Result<(Command, RuntimeGuard), String> {
     crate::developer_offline::validate(&cmd)?;
-    let leases = crate::run_leases::shared(&cmd, read_only_resources)
-        .map_err(crate::native_mods::cache_error)?;
+    let leases = crate::run_leases::shared(&cmd).map_err(crate::native_mods::cache_error)?;
     #[cfg(windows)]
     let cmd = crate::windows_runtime::redirect(cmd);
     #[cfg(windows)]
@@ -5472,9 +5457,6 @@ pub struct Settings {
     pub language: Option<crate::i18n::Language>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_mod_grants: Vec<SourceModGrant>,
-    /// Managed cache limit in GiB (unset: 25; zero: no automatic cleanup). Player data isn't cache.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_limit_gib: Option<u64>,
     /// The accent picked under each launcher theme, by its id (`themes::TWILIGHT` for Twilight's
     /// own), so going back to a theme brings back its colour. A launcher older than this map
     /// drops it when it saves: the themes then only start from their own accents again.
