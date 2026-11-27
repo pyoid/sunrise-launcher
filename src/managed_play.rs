@@ -32,7 +32,7 @@ pub(crate) fn require_unreferenced_build(tag: &str) -> Result<(), crate::native_
         Ok(false) => Ok(()),
         Ok(true) => Err(Error::ReferencedProfile),
         Err(error) => {
-            eprintln!("profile artifact references: {error}");
+            crate::elog!("profile artifact references: {error}");
             Err(Error::UnprovenReferences)
         }
     }
@@ -119,7 +119,7 @@ pub(crate) fn unsettled_at(check: &str, error: Option<&dyn std::fmt::Display>) -
             &[("check", check)],
         ),
     };
-    eprintln!("{reason}");
+    crate::elog!("{reason}");
     reason
 }
 

@@ -648,6 +648,10 @@ impl Launcher {
                 self.load_auth_statuses(false);
                 match *result {
                     Ok(game) => {
+                        sunrise_launcher::game_log::launcher::line(format!(
+                            "Starting the game: {}",
+                            game.executable
+                        ));
                         self.client_error = game.notice;
                         self.play_registry_notices = game.registry_notices;
                         for notice in &self.play_registry_notices {

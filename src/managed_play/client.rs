@@ -325,6 +325,7 @@ impl Client<'_> {
         };
         let log = |output| progress(Progress::NativeLog(output));
         if let Some(old) = profile.active()? {
+            let checking = crate::game_log::launcher::step("Checking game files");
             check_build(old.base(), old.variant.as_deref())?;
             // Prepare without the game-manifest lock. The profile stays admitted and the
             // saved generation continues to reserve this base until refresh commits.
@@ -345,6 +346,7 @@ impl Client<'_> {
             // Legacy writers still use the game lock, not profile admission. Keep
             // them out until refresh has staged the exact set we checked.
             let _manifest = game_lock(&home)?;
+            checking.note("the profile's lock is held");
             super::recover_game_install(&home).map_err(StartError::Journal)?;
             let notices = catalogue::inspect(&home, load_index)?;
             let active = profile
@@ -357,6 +359,7 @@ impl Client<'_> {
                 )
                 .map_err(|error| native_failure(&home, error, || Some(Build::Active(old))))?
                 .ok_or_else(|| unsettled!())?;
+            checking.done("");
             return Ok((active, notices));
         }
 
@@ -490,7 +493,7 @@ fn turn_off_mods(
         .collect();
     let mut worlds = crate::worlds::review_risk(home, &suspects)
         .map_err(|error| {
-            eprintln!("checking saved worlds before turning off mods: {error}");
+            crate::elog!("checking saved worlds before turning off mods: {error}");
             crate::i18n::tr("Sunrise couldn't check the saved worlds. No mods were turned off.")
                 .to_owned()
         })?

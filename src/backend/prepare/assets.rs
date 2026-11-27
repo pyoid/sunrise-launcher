@@ -28,7 +28,7 @@ pub(crate) fn complete_assets_staged(tag: &str, handoff: &crate::preparer::Hando
         &versions_dir(),
         tag,
         minecraft_folders,
-        &|line| eprintln!("{line}"),
+        &|line| crate::elog!("{line}"),
         Some(handoff),
     );
 }
@@ -43,7 +43,7 @@ pub(crate) fn complete_assets_lacking_staged(
         tag,
         Some(lacking),
         minecraft_folders,
-        &|line| eprintln!("{line}"),
+        &|line| crate::elog!("{line}"),
         Some(handoff),
     );
 }
@@ -102,8 +102,8 @@ pub(in crate::backend) fn refill_own_store(tag: &str, missing: Option<&crate::pr
             .map_err(|e| e.to_string())?;
         Ok(body)
     };
-    if let Err(e) = download_for_owner(&pins, &own, &fetch, None, &|line| eprintln!("{line}")) {
-        eprintln!("{tag}: the missing assets were not downloaded: {e}");
+    if let Err(e) = download_for_owner(&pins, &own, &fetch, None, &|line| crate::elog!("{line}")) {
+        crate::elog!("{tag}: the missing assets were not downloaded: {e}");
     }
 }
 
@@ -145,14 +145,9 @@ fn complete_assets_with(
     let Some(binary) = crate::preparer::binary(&root) else {
         return;
     };
-    let lacking = match probed {
-        Some(lacking) if !lacking.is_empty() => lacking,
-        Some(_) => return,
-        None => match crate::preparer::missing_extras(&binary, &root, &resources, handoff) {
-            Ok(Some(lacking)) if !lacking.is_empty() => lacking,
-            Ok(_) => return,
-            Err(e) => return log(format!("{tag}: {e}")),
-        },
+    let lacking = probed.or_else(|| check_extras(&binary, &root, &resources, handoff, tag, log));
+    let Some(lacking) = lacking.filter(|extras| !extras.is_empty()) else {
+        return;
     };
     if stopped() {
         return;
@@ -165,8 +160,16 @@ fn complete_assets_with(
         return log(format!("{tag}: {error}"));
     }
     let kinds: Vec<String> = lacking.iter().map(|(kind, _)| kind.clone()).collect();
+    let fetching = crate::game_log::launcher::step(format!(
+        "Fetching missing game files ({})",
+        kinds.join(", ")
+    ));
     let result =
         crate::preparer::add_extras(&binary, &root, &resources, &kinds, &folders(), log, handoff);
+    match &result {
+        Ok(_) => fetching.done(""),
+        Err(e) => fetching.failed(e),
+    }
     if !stopped() {
         tried.push(root.clone());
     }
@@ -185,6 +188,37 @@ fn complete_assets_with(
         }
         Ok(None) => {}
         Err(e) => log(format!("{tag}: {e}")),
+    }
+}
+
+/// Time the live probe; startup callers that already probed need not run it again.
+fn check_extras(
+    binary: &Path,
+    root: &Path,
+    resources: &Path,
+    handoff: Option<&crate::preparer::Handoff<'_>>,
+    tag: &str,
+    log: &dyn Fn(String),
+) -> Option<crate::preparer::Extras> {
+    let checking = crate::game_log::launcher::step("Checking game files");
+    match crate::preparer::missing_extras(binary, root, resources, handoff) {
+        Ok(Some(lacking)) if !lacking.is_empty() => {
+            checking.done(format!("{} to fetch", lacking.len()));
+            Some(lacking)
+        }
+        Ok(result) => {
+            checking.done(if result.is_some() {
+                "nothing to fetch"
+            } else {
+                "this version's preparer cannot check"
+            });
+            None
+        }
+        Err(error) => {
+            checking.failed(&error);
+            log(format!("{tag}: {error}"));
+            None
+        }
     }
 }
 

@@ -87,3 +87,13 @@ pub mod bug_report;
 
 #[cfg(test)]
 mod test_support;
+
+/// `eprintln!` that also logs: `sunrise_launcher::elog!` (bin) / `crate::elog!` (lib).
+#[macro_export]
+macro_rules! elog {
+    ($($t:tt)*) => {{
+        let text = format!($($t)*);
+        eprintln!("{text}");
+        $crate::game_log::launcher::line(&text);
+    }};
+}

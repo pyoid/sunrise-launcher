@@ -324,6 +324,8 @@ fn scanned_world(path: &Path) -> std::io::Result<Option<Scanned>> {
         icon: icon.is_file().then_some(icon),
         mods,
     };
+    crate::game_log::launcher::hide(&world.folder);
+    crate::game_log::launcher::hide(&world.name);
     Ok(Some(Scanned {
         world,
         known,

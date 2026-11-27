@@ -387,7 +387,7 @@ pub fn run() -> Option<i32> {
         Ok(code) => code,
         Err(e) => {
             // An error may name a file or folder as it was found: shown as text, never obeyed.
-            eprintln!(
+            sunrise_launcher::elog!(
                 "error: {}",
                 sunrise_launcher::theme_files::for_terminal(&e.to_string())
             );

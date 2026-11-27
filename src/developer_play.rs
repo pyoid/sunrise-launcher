@@ -75,7 +75,7 @@ impl Launcher {
                                         &played.vars(),
                                     );
                                 }) {
-                                    eprintln!(
+                                    sunrise_launcher::elog!(
                                         "{}",
                                         trf("Play time not saved: {error}", &[("error", &error)])
                                     );
@@ -129,6 +129,9 @@ impl Launcher {
                                 ),
                                 None => summary,
                             };
+                            sunrise_launcher::game_log::launcher::line(format!(
+                                "The game crashed: {summary}"
+                            ));
                             self.crash = Some(Crash { summary });
                         }
                     }
@@ -249,6 +252,8 @@ impl Launcher {
                     account::discard_launch_session(session_file);
                     return;
                 }
+                self.play_step = None;
+                self.play_download = None;
                 for notice in &registry_notices {
                     console_page::keep_line(
                         &mut self.prepare_log,

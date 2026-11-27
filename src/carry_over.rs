@@ -69,7 +69,7 @@ pub fn at_start() -> Result<(), String> {
         return Ok(());
     };
     if let Err(error) = carry_over(&data, &config) {
-        eprintln!("Could not copy the earlier launcher's data: {error}");
+        crate::elog!("Could not copy the earlier launcher's data: {error}");
         *STARTUP_ERROR
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.clone());
@@ -238,14 +238,14 @@ fn remove_leftover(leftover: &Path) {
     match launcher_in_use(leftover) {
         Ok(false) => {
             if let Err(error) = fs::remove_dir_all(leftover) {
-                eprintln!("Could not remove {}: {error}", leftover.display());
+                crate::elog!("Could not remove {}: {error}", leftover.display());
             }
         }
-        Ok(true) => eprintln!(
+        Ok(true) => crate::elog!(
             "Kept {}: something besides caches was written to it.",
             leftover.display()
         ),
-        Err(error) => eprintln!("{error}"),
+        Err(error) => crate::elog!("{error}"),
     }
 }
 
@@ -307,19 +307,19 @@ fn settle(stage: &Path) {
         chrono::Utc::now().format("%Y%m%d-%H%M%S")
     ));
     match fs::rename(stage, &kept) {
-        Ok(()) => eprintln!(
+        Ok(()) => crate::elog!(
             "Kept {} ({}): the data folder it was copied for already existed, so it was not replaced.",
             kept.display(),
             left.join(", ")
         ),
-        Err(error) => eprintln!("Could not keep {}: {error}", stage.display()),
+        Err(error) => crate::elog!("Could not keep {}: {error}", stage.display()),
     }
 }
 
 /// Removes the stage of a finished copy. A failure is reported and leaves it for the next start.
 fn discard(stage: &Path) {
     if let Err(error) = fs::remove_dir_all(stage) {
-        eprintln!(
+        crate::elog!(
             "{}",
             crate::i18n::trf(
                 "Could not remove {path}, left from copying the earlier launcher's data; the next start tries again: {error}",

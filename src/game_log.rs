@@ -5,6 +5,8 @@
 //! 90 days unread, and the uploader gets a token that deletes the paste. Before anything leaves
 //! the computer, [`private`] takes out the player's home folder, their user name and their
 //! account names.
+pub mod launcher;
+
 use std::path::Path;
 
 /// mclo.gs's API; `SUNRISE_LAUNCHER_PASTE_URL` points it elsewhere for tests.
@@ -32,9 +34,8 @@ pub fn matches(line: &str, search: &str) -> bool {
 
 /// The names to take out of a log: the account names, the offline player name kept in each game
 /// folder (`sunrise-player.txt`), and the computer's user name.
-pub fn names(homes: &[&Path]) -> Vec<String> {
-    let accounts = crate::account::Accounts::load();
-    let mut names: Vec<String> = accounts.accounts.into_iter().map(|a| a.name).collect();
+pub fn names(homes: &[&Path], accounts: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut names: Vec<String> = accounts.into_iter().collect();
     for home in homes {
         if let Ok(name) = std::fs::read_to_string(home.join("sunrise-player.txt")) {
             names.push(name.trim().to_string());

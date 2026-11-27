@@ -579,3 +579,64 @@ fn a_status_read_gives_up_behind_a_long_operation() {
     drop(held);
     assert!(session::lock_within(&store, Some(std::time::Duration::from_secs(5))).is_ok());
 }
+
+/// A whole sign-in leaves each stage and each request's service, host and status in the launcher
+/// log, and none of the tokens, the account's ids or its name.
+#[test]
+fn a_sign_in_logs_its_stages_and_requests_and_no_secret() {
+    let (_, ep) = mock(|_| {});
+    let before = crate::game_log::launcher::since(0).0;
+    let ms = MsTokens {
+        access: "ms-access-1".into(),
+        refresh: "ms-refresh-1".into(),
+    };
+    finish_sign_in(&ep, ms).unwrap();
+    // Other tests log beside this one: keep the sign-in's own lines.
+    let (_, lines) = crate::game_log::launcher::since(before);
+    let log: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains("Sign-in: ") || l.contains(" -> "))
+        .collect();
+    let has = |text: &str| log.iter().any(|l| l.contains(text));
+    for kept in [
+        "Sign-in: Xbox Live user authentication: done in ",
+        "Sign-in: XSTS authorization: done in ",
+        "Sign-in: Minecraft login: done in ",
+        "Sign-in: reading the Minecraft profile: done in ",
+        "Xbox Live: POST ",
+        " -> 200 (",
+    ] {
+        assert!(has(kept), "{kept:?} missing in {log:#?}");
+    }
+    for secret in [
+        "ms-access-1",
+        "ms-refresh-1",
+        "xbl-token",
+        "xsts-token",
+        "uhs-1",
+        "2535400000000000",
+        "mc-token",
+        UUID,
+        "Notch",
+    ] {
+        assert!(!has(secret), "{secret:?} in {log:#?}");
+    }
+}
+
+#[test]
+fn device_code_poll_is_logged_as_waiting_without_its_code() {
+    let (_, ep) = mock(|m| m.pending = 1);
+    let code = device_code(&ep, "test-client").unwrap();
+    let before = crate::game_log::launcher::since(0).0;
+    assert!(matches!(
+        poll(&ep, "test-client", &code).unwrap(),
+        Poll::Pending
+    ));
+    let (_, lines) = crate::game_log::launcher::since(before);
+    assert!(lines
+        .iter()
+        .any(|line| line.contains("Microsoft: POST ") && line.contains(" -> waiting for sign-in")));
+    assert!(!lines
+        .iter()
+        .any(|line| line.contains("dev-1") || line.contains("ABCD-EFGH")));
+}

@@ -130,7 +130,7 @@ pub(in crate::backend) fn resources_compatible(
     }
     let declared = |root: &Path| {
         output_version_at(root).inspect_err(|error| {
-            eprintln!("{}: {}", root.display(), preparer_source_error(error));
+            crate::elog!("{}: {}", root.display(), preparer_source_error(error));
         })
     };
     let (Ok(source), Ok(target)) = (declared(from), declared(to)) else {

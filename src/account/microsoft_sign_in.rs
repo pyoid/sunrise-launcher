@@ -175,6 +175,13 @@ pub(super) fn send(
     body: Option<Body>,
     service: &str,
 ) -> Result<(u16, Value), SignInError> {
+    let started = std::time::Instant::now();
+    let method = request.method().to_owned();
+    let url = url::Url::parse(request.url()).ok();
+    let host = url
+        .as_ref()
+        .and_then(url::Url::host_str)
+        .unwrap_or("unknown host");
     let result = match body {
         None => request.call(),
         Some(Body::Form(fields)) => request.send_form(&fields),
@@ -184,12 +191,38 @@ pub(super) fn send(
         Ok(r) => r,
         Err(ureq::Error::Status(_, r)) => r,
         Err(ureq::Error::Transport(_)) => {
+            crate::game_log::launcher::line(format!(
+                "{service}: {method} {host} -> could not connect ({} ms)",
+                started.elapsed().as_millis()
+            ));
             return Err(unavailable(service));
         }
     };
     let status = response.status();
     let text = response.into_string().unwrap_or_default();
-    Ok((status, serde_json::from_str(&text).unwrap_or(Value::Null)))
+    let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let answer = match (status, value.get("error").and_then(Value::as_str)) {
+        (400, Some("authorization_pending")) => "waiting for sign-in".to_owned(),
+        (400, Some("slow_down")) => "waiting; polling more slowly".to_owned(),
+        _ => status.to_string(),
+    };
+    crate::game_log::launcher::line(format!(
+        "{service}: {method} {host} -> {answer} ({} ms)",
+        started.elapsed().as_millis()
+    ));
+    Ok((status, value))
+}
+
+/// Record the outcome without putting a request, response body or account identifier in the log.
+fn staged<T>(stage: &str, run: impl FnOnce() -> Result<T, SignInError>) -> Result<T, SignInError> {
+    let step = crate::game_log::launcher::step(format!("Sign-in: {stage}"));
+    let result = run();
+    if result.is_ok() {
+        step.done("");
+    } else {
+        step.failed("services did not complete this stage");
+    }
+    result
 }
 
 fn unavailable(service: &str) -> SignInError {
@@ -253,36 +286,38 @@ pub enum Poll {
 }
 
 pub fn device_code(ep: &Endpoints, client_id: &str) -> Result<DeviceCode, SignInError> {
-    let (status, v) = send(
-        request_to("POST", &format!("{}/devicecode", ep.microsoft))?,
-        Some(Body::Form(vec![("client_id", client_id), ("scope", SCOPE)])),
-        "Microsoft",
-    )?;
-    match (
-        status,
-        str_field(&v, "user_code"),
-        str_field(&v, "device_code"),
-    ) {
-        (200, Some(user_code), Some(device_code)) => Ok(DeviceCode {
-            user_code,
-            verification_uri: str_field(&v, "verification_uri")
-                .unwrap_or_else(|| sunrise_launcher_addresses::MICROSOFT_LINK.into()),
-            interval: v
-                .get("interval")
-                .and_then(Value::as_u64)
-                .unwrap_or(5)
-                .clamp(1, 60),
-            // The service's numbers, bounded: Instant + a huge interval panics the sign-in thread.
-            expires_at: now().saturating_add(
-                v.get("expires_in")
+    staged("requesting a Microsoft device code", || {
+        let (status, v) = send(
+            request_to("POST", &format!("{}/devicecode", ep.microsoft))?,
+            Some(Body::Form(vec![("client_id", client_id), ("scope", SCOPE)])),
+            "Microsoft",
+        )?;
+        match (
+            status,
+            str_field(&v, "user_code"),
+            str_field(&v, "device_code"),
+        ) {
+            (200, Some(user_code), Some(device_code)) => Ok(DeviceCode {
+                user_code,
+                verification_uri: str_field(&v, "verification_uri")
+                    .unwrap_or_else(|| sunrise_launcher_addresses::MICROSOFT_LINK.into()),
+                interval: v
+                    .get("interval")
                     .and_then(Value::as_u64)
-                    .unwrap_or(900)
-                    .min(3600),
-            ),
-            device_code,
-        }),
-        _ => Err(oauth_error(&v)),
-    }
+                    .unwrap_or(5)
+                    .clamp(1, 60),
+                // The service's numbers, bounded: Instant + a huge interval panics the sign-in thread.
+                expires_at: now().saturating_add(
+                    v.get("expires_in")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(900)
+                        .min(3600),
+                ),
+                device_code,
+            }),
+            _ => Err(oauth_error(&v)),
+        }
+    })
 }
 
 /// The OAuth error codes as messages for the player.
@@ -340,48 +375,52 @@ pub fn wait_for_sign_in(
     code: &DeviceCode,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<MsTokens, SignInError> {
-    let mut interval = code.interval;
-    loop {
-        let until = std::time::Instant::now() + Duration::from_secs(interval);
-        while std::time::Instant::now() < until {
-            if cancelled() {
-                return Err(tr("Sign-in cancelled.").into());
+    staged("waiting for the player to approve in the browser", || {
+        let mut interval = code.interval;
+        loop {
+            let until = std::time::Instant::now() + Duration::from_secs(interval);
+            while std::time::Instant::now() < until {
+                if cancelled() {
+                    return Err(tr("Sign-in cancelled.").into());
+                }
+                std::thread::sleep(Duration::from_millis(100));
             }
-            std::thread::sleep(Duration::from_millis(100));
+            if now() > code.expires_at {
+                return Err(tr("The sign-in code expired. Start again.").into());
+            }
+            match poll(ep, client_id, code)? {
+                Poll::Pending => {}
+                Poll::SlowDown => interval = (interval + 5).min(60),
+                Poll::Done(tokens) => return Ok(tokens),
+            }
         }
-        if now() > code.expires_at {
-            return Err(tr("The sign-in code expired. Start again.").into());
-        }
-        match poll(ep, client_id, code)? {
-            Poll::Pending => {}
-            Poll::SlowDown => interval = (interval + 5).min(60),
-            Poll::Done(tokens) => return Ok(tokens),
-        }
-    }
+    })
 }
 
 fn refresh_ms(ep: &Endpoints, client_id: &str, refresh: &str) -> Result<MsTokens, SignInError> {
-    let (status, v) = send(
-        request_to("POST", &format!("{}/token", ep.microsoft))?,
-        Some(Body::Form(vec![
-            ("grant_type", "refresh_token"),
-            ("client_id", client_id),
-            ("refresh_token", refresh),
-            ("scope", SCOPE),
-        ])),
-        "Microsoft",
-    )?;
-    // A refresh token issued to another app registration (the launcher's client ID changed
-    // since the player signed in) is refused as the client's; only a new sign-in mends it.
-    match (status, v.get("error").and_then(Value::as_str)) {
-        (400..=403, _) | (_, Some("invalid_client" | "unauthorized_client")) => {
-            Err(SignInError::SignInAgain)
+    staged("refreshing the Microsoft token", || {
+        let (status, v) = send(
+            request_to("POST", &format!("{}/token", ep.microsoft))?,
+            Some(Body::Form(vec![
+                ("grant_type", "refresh_token"),
+                ("client_id", client_id),
+                ("refresh_token", refresh),
+                ("scope", SCOPE),
+            ])),
+            "Microsoft",
+        )?;
+        // A refresh token issued to another app registration (the launcher's client ID changed
+        // since the player signed in) is refused as the client's; only a new sign-in mends it.
+        match (status, v.get("error").and_then(Value::as_str)) {
+            (400..=403, _) | (_, Some("invalid_client" | "unauthorized_client")) => {
+                Err(SignInError::SignInAgain)
+            }
+            _ => {
+                available(status, "Microsoft")?;
+                ms_tokens(status, &v)
+            }
         }
-        _ => {
-            available(status, "Microsoft")?;
-            ms_tokens(status, &v)
-        }
-    }
+    })
 }
 
 // ----- Xbox Live, XSTS, Minecraft ----------------------------------------------------------------
@@ -419,44 +458,49 @@ fn minecraft_login(
     progress: &dyn Fn(session::Phase),
 ) -> Result<Minecraft, SignInError> {
     progress(session::Phase::Xbox);
-    let (status, xbl) = send(
-        request_to("POST", &ep.xbox_user)?,
-        Some(Body::Json(json!({
-            "Properties": {
-                "AuthMethod": "RPS",
-                "SiteName": "user.auth.xboxlive.com",
-                "RpsTicket": format!("d={ms_access}"),
-            },
-            "RelyingParty": "http://auth.xboxlive.com",
-            "TokenType": "JWT",
-        }))),
-        "Xbox Live",
-    )?;
-    available(status, "Xbox Live")?;
-    let xbl_token = str_field(&xbl, "Token")
-        .filter(|_| status == 200)
-        .ok_or_else(|| tr("Xbox Live refused the sign-in.").to_string())?;
-    let (status, xsts) = send(
-        request_to("POST", &ep.xsts)?,
-        Some(Body::Json(json!({
-            "Properties": { "SandboxId": "RETAIL", "UserTokens": [xbl_token] },
-            "RelyingParty": "rp://api.minecraftservices.com/",
-            "TokenType": "JWT",
-        }))),
-        "Xbox Live",
-    )?;
-    if let Some(code) = xsts.get("XErr").and_then(Value::as_u64) {
-        return Err(xsts_error(code).into());
-    }
-    available(status, "Xbox Live")?;
-    let claims = xsts.pointer("/DisplayClaims/xui/0");
-    let (Some(xsts_token), Some(uhs)) = (
-        str_field(&xsts, "Token").filter(|_| status == 200),
-        claims.and_then(|c| str_field(c, "uhs")),
-    ) else {
-        return Err(tr("Xbox Live refused the sign-in.").into());
-    };
-    let xuid = claims.and_then(|c| str_field(c, "xid"));
+    let xbl_token = staged("Xbox Live user authentication", || {
+        let (status, xbl) = send(
+            request_to("POST", &ep.xbox_user)?,
+            Some(Body::Json(json!({
+                "Properties": {
+                    "AuthMethod": "RPS",
+                    "SiteName": "user.auth.xboxlive.com",
+                    "RpsTicket": format!("d={ms_access}"),
+                },
+                "RelyingParty": "http://auth.xboxlive.com",
+                "TokenType": "JWT",
+            }))),
+            "Xbox Live",
+        )?;
+        available(status, "Xbox Live")?;
+        str_field(&xbl, "Token")
+            .filter(|_| status == 200)
+            .ok_or_else(|| SignInError::from(tr("Xbox Live refused the sign-in.")))
+    })?;
+    let (xsts_token, uhs, xuid) = staged("XSTS authorization", || {
+        let (status, xsts) = send(
+            request_to("POST", &ep.xsts)?,
+            Some(Body::Json(json!({
+                "Properties": { "SandboxId": "RETAIL", "UserTokens": [xbl_token] },
+                "RelyingParty": "rp://api.minecraftservices.com/",
+                "TokenType": "JWT",
+            }))),
+            "Xbox Live",
+        )?;
+        if let Some(code) = xsts.get("XErr").and_then(Value::as_u64) {
+            return Err(xsts_error(code).into());
+        }
+        available(status, "Xbox Live")?;
+        let claims = xsts.pointer("/DisplayClaims/xui/0");
+        let (Some(xsts_token), Some(uhs)) = (
+            str_field(&xsts, "Token").filter(|_| status == 200),
+            claims.and_then(|c| str_field(c, "uhs")),
+        ) else {
+            return Err(tr("Xbox Live refused the sign-in.").into());
+        };
+        let xuid = claims.and_then(|c| str_field(c, "xid"));
+        Ok((xsts_token, uhs, xuid))
+    })?;
     progress(session::Phase::Minecraft);
     let (token, expires_in) = minecraft_token(ep, &format!("XBL3.0 x={uhs};{xsts_token}"))?;
     Ok(Minecraft {
@@ -472,37 +516,39 @@ fn minecraft_login(
 /// martipops). `login_with_xbox` stays the fallback, so a sign-in that worked before still does
 /// when the other refuses.
 fn minecraft_token(ep: &Endpoints, xtoken: &str) -> Result<(String, u64), SignInError> {
-    let lifetime = |v: &Value| v.get("expires_in").and_then(Value::as_u64).unwrap_or(86400);
-    let launcher = send(
-        request_to("POST", &format!("{}/launcher/login", ep.minecraft))?,
-        Some(Body::Json(
-            json!({ "xtoken": xtoken, "platform": "PC_LAUNCHER" }),
-        )),
-        "the Minecraft services",
-    );
-    if let Ok((200, v)) = &launcher {
-        if let Some(token) = str_field(v, "access_token").filter(|token| !token.is_empty()) {
-            return Ok((token, lifetime(v)));
+    staged("Minecraft login", || {
+        let lifetime = |v: &Value| v.get("expires_in").and_then(Value::as_u64).unwrap_or(86400);
+        let launcher = send(
+            request_to("POST", &format!("{}/launcher/login", ep.minecraft))?,
+            Some(Body::Json(
+                json!({ "xtoken": xtoken, "platform": "PC_LAUNCHER" }),
+            )),
+            "the Minecraft services",
+        );
+        if let Ok((200, v)) = &launcher {
+            if let Some(token) = str_field(v, "access_token").filter(|token| !token.is_empty()) {
+                return Ok((token, lifetime(v)));
+            }
         }
-    }
-    let (status, mc) = send(
-        request_to(
-            "POST",
-            &format!("{}/authentication/login_with_xbox", ep.minecraft),
-        )?,
-        Some(Body::Json(json!({ "identityToken": xtoken }))),
-        "the Minecraft services",
-    )?;
-    available(status, "the Minecraft services")?;
-    match (status, str_field(&mc, "access_token")) {
-        (200, Some(token)) if !token.is_empty() => Ok((token, lifetime(&mc))),
-        // New Azure apps are refused until Mojang approves them (Minecraft API access).
-        (403, _) => Err(tr(
-            "The Minecraft services refused this launcher: its app is not approved by Mojang yet.",
-        )
-        .into()),
-        _ => Err(tr("The Minecraft services refused the sign-in.").into()),
-    }
+        let (status, mc) = send(
+            request_to(
+                "POST",
+                &format!("{}/authentication/login_with_xbox", ep.minecraft),
+            )?,
+            Some(Body::Json(json!({ "identityToken": xtoken }))),
+            "the Minecraft services",
+        )?;
+        available(status, "the Minecraft services")?;
+        match (status, str_field(&mc, "access_token")) {
+            (200, Some(token)) if !token.is_empty() => Ok((token, lifetime(&mc))),
+            // New Azure apps are refused until Mojang approves them (Minecraft API access).
+            (403, _) => Err(tr(
+                "The Minecraft services refused this launcher: its app is not approved by Mojang yet.",
+            )
+            .into()),
+            _ => Err(tr("The Minecraft services refused the sign-in.").into()),
+        }
+    })
 }
 
 pub(super) fn bearer(request: ureq::Request, token: &str) -> ureq::Request {
@@ -511,31 +557,33 @@ pub(super) fn bearer(request: ureq::Request, token: &str) -> ureq::Request {
 
 /// Whether the account owns Minecraft: Java Edition (Game Pass included).
 fn owns_game(ep: &Endpoints, token: &str) -> Result<bool, SignInError> {
-    let (status, v) = send(
-        bearer(
-            request_to("GET", &format!("{}/entitlements/mcstore", ep.minecraft))?,
-            token,
-        ),
-        None,
-        "the Minecraft services",
-    )?;
-    available(status, "the Minecraft services")?;
-    if matches!(status, 401 | 403) {
-        return Err(SignInError::SignInAgain);
-    }
-    if status != 200 {
-        return Err(tr("Could not check which games this account owns.").into());
-    }
-    Ok(v.get("items")
-        .and_then(Value::as_array)
-        .is_some_and(|items| {
-            items.iter().any(|i| {
-                matches!(
-                    i.get("name").and_then(Value::as_str),
-                    Some("game_minecraft" | "product_minecraft")
-                )
-            })
-        }))
+    staged("checking which games the account owns", || {
+        let (status, v) = send(
+            bearer(
+                request_to("GET", &format!("{}/entitlements/mcstore", ep.minecraft))?,
+                token,
+            ),
+            None,
+            "the Minecraft services",
+        )?;
+        available(status, "the Minecraft services")?;
+        if matches!(status, 401 | 403) {
+            return Err(SignInError::SignInAgain);
+        }
+        if status != 200 {
+            return Err(tr("Could not check which games this account owns.").into());
+        }
+        Ok(v.get("items")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items.iter().any(|i| {
+                    matches!(
+                        i.get("name").and_then(Value::as_str),
+                        Some("game_minecraft" | "product_minecraft")
+                    )
+                })
+            }))
+    })
 }
 
 /// A Minecraft profile, as the launcher shows and remembers it (no secrets).
@@ -553,46 +601,52 @@ pub struct Account {
 
 /// The profile; none when the account has none (it doesn't own the game, or never made one).
 fn profile(ep: &Endpoints, token: &str) -> Result<Option<Account>, SignInError> {
-    let (status, v) = send(
-        bearer(
-            request_to("GET", &format!("{}/minecraft/profile", ep.minecraft))?,
-            token,
-        ),
-        None,
-        "the Minecraft services",
-    )?;
-    available(status, "the Minecraft services")?;
-    if matches!(status, 401 | 403) {
-        return Err(SignInError::SignInAgain);
-    }
-    if status == 404 {
-        return Ok(None);
-    }
-    let (200, Some(uuid), Some(name)) = (status, str_field(&v, "id"), str_field(&v, "name")) else {
-        return Err(tr("Could not read the Minecraft profile.").into());
-    };
-    let active = |key: &str| {
-        v.get(key)
-            .and_then(Value::as_array)
-            .and_then(|list| {
-                list.iter()
-                    .find(|s| s.get("state").and_then(Value::as_str) == Some("ACTIVE"))
-            })
-            .cloned()
-    };
-    Ok(Some(Account {
-        uuid: uuid.replace('-', "").to_lowercase(),
-        name,
-        skin: active("skins").and_then(|s| {
-            Some((
-                str_field(&s, "url")?,
-                str_field(&s, "variant")
-                    .unwrap_or_else(|| "CLASSIC".into())
-                    .to_lowercase(),
-            ))
-        }),
-        cape: active("capes").and_then(|c| str_field(&c, "url")),
-    }))
+    staged("reading the Minecraft profile", || {
+        let (status, v) = send(
+            bearer(
+                request_to("GET", &format!("{}/minecraft/profile", ep.minecraft))?,
+                token,
+            ),
+            None,
+            "the Minecraft services",
+        )?;
+        available(status, "the Minecraft services")?;
+        if matches!(status, 401 | 403) {
+            return Err(SignInError::SignInAgain);
+        }
+        if status == 404 {
+            return Ok(None);
+        }
+        let (200, Some(uuid), Some(name)) = (status, str_field(&v, "id"), str_field(&v, "name"))
+        else {
+            return Err(tr("Could not read the Minecraft profile.").into());
+        };
+        crate::game_log::launcher::hide(&name);
+        let uuid = uuid.replace('-', "").to_lowercase();
+        crate::game_log::launcher::hide(&uuid);
+        let active = |key: &str| {
+            v.get(key)
+                .and_then(Value::as_array)
+                .and_then(|list| {
+                    list.iter()
+                        .find(|s| s.get("state").and_then(Value::as_str) == Some("ACTIVE"))
+                })
+                .cloned()
+        };
+        Ok(Some(Account {
+            uuid,
+            name,
+            skin: active("skins").and_then(|s| {
+                Some((
+                    str_field(&s, "url")?,
+                    str_field(&s, "variant")
+                        .unwrap_or_else(|| "CLASSIC".into())
+                        .to_lowercase(),
+                ))
+            }),
+            cape: active("capes").and_then(|c| str_field(&c, "url")),
+        }))
+    })
 }
 
 /// What the keychain keeps for one account.

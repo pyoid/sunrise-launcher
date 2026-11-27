@@ -143,7 +143,9 @@ impl Launcher {
         for home in homes {
             match backend::switch_from_auto(&home, api) {
                 Ok(changed) => switched |= changed,
-                Err(e) => eprintln!("Sunrise launcher: could not switch to {label}: {e}"),
+                Err(e) => {
+                    sunrise_launcher::elog!("Sunrise launcher: could not switch to {label}: {e}")
+                }
             }
         }
         switched.then_some(label)
@@ -460,6 +462,7 @@ impl Launcher {
         self.native_cancellation = Some(cancellation.clone());
         let tx = self.tx.clone();
         std::thread::spawn(move || {
+            let announced = std::cell::Cell::new(None);
             let result = Client {
                 instance: &instance,
                 accepted_account: intent.account.as_deref(),
@@ -494,6 +497,7 @@ impl Launcher {
                 },
                 &cancellation,
                 |progress| {
+                    crate::launcher_messages::announce_play_step(&announced, &progress);
                     let msg = match progress {
                         Progress::Download(fraction) => Msg::PlayDownload(fraction),
                         Progress::Prepare => Msg::PlayStep(backend::PlayStep::Prepare),

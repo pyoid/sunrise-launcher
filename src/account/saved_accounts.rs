@@ -29,10 +29,15 @@ impl Accounts {
         self.save_to(&Self::path())
     }
     pub(crate) fn load_from(path: &Path) -> Self {
-        std::fs::read_to_string(path)
+        let accounts: Self = std::fs::read_to_string(path)
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        for account in &accounts.accounts {
+            crate::game_log::launcher::hide(&account.name);
+            crate::game_log::launcher::hide(&account.uuid);
+        }
+        accounts
     }
     pub(crate) fn save_to(&self, path: &Path) -> Result<(), String> {
         if let Some(dir) = path.parent() {

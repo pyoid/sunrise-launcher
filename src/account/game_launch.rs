@@ -109,7 +109,7 @@ fn launch_checked(
                     "Can't read {name}'s sign-in: {why}",
                     &[("name", &account.name), ("why", &why.0)],
                 );
-                eprintln!("Sunrise: {said}");
+                crate::elog!("Sunrise: {said}");
                 if plays {
                     pass.offline = Some(said.clone());
                 }
@@ -396,7 +396,7 @@ pub fn session_for_game(game_home: &Path) -> Result<GameSession, NoOwner> {
         &mut accounts,
     )?;
     if let Err(e) = accounts.save_renewed() {
-        eprintln!("Sunrise: the accounts are not saved: {e}");
+        crate::elog!("Sunrise: the accounts are not saved: {e}");
     }
     session_file(game_home, pass)
 }
@@ -415,7 +415,7 @@ pub fn session_for_game_accepted(game_home: &Path, accepted: &str) -> Result<Gam
         accepted,
     )?;
     if let Err(e) = accounts.save_renewed() {
-        eprintln!("Sunrise: the accounts are not saved: {e}");
+        crate::elog!("Sunrise: the accounts are not saved: {e}");
     }
     // The provider call can take time. Do not write for an account removed meanwhile.
     let _operation = session::lock(store()).map_err(|why| NoOwner { keyring: Some(why) })?;
@@ -466,7 +466,7 @@ pub fn session_for_game_as(game_home: &Path, who: &str) -> Result<GameSession, S
         who,
     );
     if let Err(e) = accounts.save_renewed() {
-        eprintln!("Sunrise: the accounts are not saved: {e}");
+        crate::elog!("Sunrise: the accounts are not saved: {e}");
     }
     session_file(game_home, pass?).map_err(|why| why.to_string())
 }

@@ -198,7 +198,9 @@ impl SelfUpdate {
                 *armed = false;
             }
         }
-        settings::log_launcher_check_failure(error.message(), |line| eprintln!("{line}"));
+        settings::log_launcher_check_failure(error.message(), |line| {
+            sunrise_launcher::elog!("{line}")
+        });
         updates.launcher_error = Some(error);
     }
 

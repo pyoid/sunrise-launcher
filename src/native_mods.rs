@@ -1583,6 +1583,25 @@ fn timed(step: &str, since: std::time::Instant) -> Result<(), Failed> {
     Ok(())
 }
 
+/// [`pipeline`] as one step of the launcher log, so a build that hangs shows in the Logs panel.
+fn logged_pipeline(
+    lease: &crate::native_cache::Cache,
+    base: &str,
+    folder: &Path,
+    profile: Profile,
+    target: Target,
+    options: BuildOptions<'_>,
+    progress: &impl Fn(Step),
+) -> Result<Built, Failed> {
+    let step = crate::game_log::launcher::step(format!("Building native mods for {base}"));
+    let built = pipeline(lease, base, folder, profile, target, options, progress);
+    match &built {
+        Ok(built) => step.done(&built.version),
+        Err(error) => step.failed(error.to_string()),
+    }
+    built
+}
+
 /// The pipeline both targets build with ([`build`], [`build_server`]): `folder`'s mods on the
 /// Sunrise revision they pin (else `base`'s, the installed version whose game files the build
 /// reuses: a native build's own revision when it is one, [`base_for`]), compiled as `target`
@@ -2184,6 +2203,7 @@ fn pipeline(
                 mixins_from_source,
             },
             &|id, done, total| {
+                crate::game_log::launcher::line(format!("Compiling {id}"));
                 progress(Step::Mod {
                     id: id.to_owned(),
                     done,
@@ -2497,7 +2517,7 @@ pub fn build(
         })?;
         let built = isolated(
             |skip| {
-                pipeline(
+                logged_pipeline(
                     lease,
                     base,
                     folder,
@@ -2547,7 +2567,7 @@ pub(crate) fn build_exact_client(
                 .tempdir_in(root())
                 .map_err(|e| e.to_string())?;
             let folder = stage_allowed(home, &input.path().join("mods"))?;
-            let built = pipeline(
+            let built = logged_pipeline(
                 cache,
                 base,
                 &folder,
@@ -2738,7 +2758,7 @@ pub fn build_server(
             let profile = select_build_profile(Profile::default(), profile, &cancellation, || {
                 planning::classify(folder, Some(base), lease, &cancellation)
             })?;
-            let built = pipeline(
+            let built = logged_pipeline(
                 lease,
                 base,
                 folder,

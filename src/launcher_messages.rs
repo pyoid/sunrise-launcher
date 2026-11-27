@@ -18,6 +18,26 @@ pub(crate) fn settle_managed_play_error(
     cancelled
 }
 
+/// Log the start of a Play stage once, even when the worker reports many updates for it.
+pub(super) fn announce_play_step(
+    announced: &std::cell::Cell<Option<backend::PlayStep>>,
+    progress: &sunrise_launcher::managed_play::Progress,
+) {
+    use backend::PlayStep;
+    use sunrise_launcher::managed_play::Progress;
+    let (step, what) = match progress {
+        Progress::Download(_) => (PlayStep::Download, "downloading the game"),
+        Progress::Prepare => (PlayStep::Prepare, "preparing the game's files"),
+        Progress::NativeBuild { .. } => (PlayStep::Native, "building mods"),
+        Progress::Verify => (PlayStep::Assets, "checking the game's files"),
+        Progress::SignIn => (PlayStep::SignIn, "reading the sign-in"),
+        _ => return,
+    };
+    if announced.replace(Some(step)) != Some(step) {
+        backend::play_step(what);
+    }
+}
+
 impl Launcher {
     pub(super) fn refresh_installed(&mut self) {
         (self.installed, self.known_nightly) =
@@ -26,7 +46,7 @@ impl Launcher {
     }
 
     pub(crate) fn drain(&mut self, window: gpui::AnyWindowHandle, cx: &mut Context<Self>) {
-        let mut changed = false;
+        let mut changed = self.pull_logs();
         self.perf.tick();
         if self.bench.as_ref().is_some_and(perf::Bench::ready_for_idle) {
             // Finish one-time fallback font loading before the benchmark starts its idle sample.

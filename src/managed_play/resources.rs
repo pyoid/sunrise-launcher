@@ -156,7 +156,7 @@ impl Resources {
                 Ok(_) => Ok(None),
                 Err(error) if stop.is_some_and(Cancellation::is_stopped) => Err(error),
                 Err(error) => {
-                    eprintln!("{error}");
+                    crate::elog!("{error}");
                     Ok(None)
                 }
             }
@@ -346,15 +346,14 @@ fn logged<T>(
     what: &str,
     run: impl FnOnce() -> Result<(T, usize), pool::Error>,
 ) -> Result<T, pool::Error> {
-    let start = std::time::Instant::now();
-    eprintln!("{what}");
+    let step = crate::game_log::launcher::step(what);
     match run() {
         Ok((value, files)) => {
-            eprintln!("{what}: {files} files ({} ms)", start.elapsed().as_millis());
+            step.done(format!("{files} files"));
             Ok(value)
         }
         Err(error) => {
-            eprintln!("{what}: {error} ({} ms)", start.elapsed().as_millis());
+            step.failed(error.to_string());
             Err(error)
         }
     }

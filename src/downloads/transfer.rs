@@ -5,10 +5,15 @@ use super::resume::{partial_path, sweep_partials, valid};
 use super::runtime::{build_client, Clients};
 use super::CANCELLED;
 use crate::backend::lock::recover;
+use crate::game_log::launcher;
 use crate::i18n::{tr, trf};
+
+const LOGGED_FILE_SIZE: u64 = 1_000_000;
+const LOGGED_BATCH_FILES: usize = 10;
 
 /// Why acquiring a permit can't fail: nothing closes these semaphores (they are private to this
 /// file, which never calls `close()`).
+
 const NEVER_CLOSED: &str = "the download semaphores are never closed";
 use futures_util::{stream, StreamExt};
 use reqwest::{header, Client, Response, StatusCode, Url};
@@ -160,6 +165,14 @@ pub(super) struct Connection<'a> {
     _host: OwnedSemaphorePermit,
     _count: Count<'a>,
 }
+/// Log the host only; the path or query may carry credentials.
+fn host_of(url: &str) -> String {
+    Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_else(|| "an unknown host".into())
+}
+
 /// A refusal from `url`, as said to the player.
 fn answered(url: &Url, status: StatusCode) -> String {
     trf(
@@ -405,6 +418,25 @@ impl Downloader {
                 Ok(())
             }
             .await;
+            if let Some(size) = artifact.size.filter(|&size| size >= LOGGED_FILE_SIZE) {
+                let file = artifact
+                    .path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy();
+                let host = host_of(&artifact.url);
+                match &result {
+                    Ok(()) => launcher::line(format!(
+                        "Downloaded {file} from {host}: {} in {:.1} s",
+                        crate::storage::format_bytes(size),
+                        start.elapsed().as_secs_f64()
+                    )),
+                    Err(error) if error.message != CANCELLED => {
+                        launcher::line(format!("Download of {file} from {host} failed"))
+                    }
+                    Err(_) => {}
+                }
+            }
             result
         };
         let result = tokio::select! {biased; _=cancelled(cancel)=>Err(Failure::permanent(CANCELLED)),result=operation=>result};
@@ -490,6 +522,16 @@ impl Downloader {
         fail_fast: bool,
     ) -> Result<(), String> {
         self.register(artifacts);
+        let step = (artifacts.len() >= LOGGED_BATCH_FILES).then(|| {
+            let mut hosts: Vec<_> = artifacts.iter().map(|file| host_of(&file.url)).collect();
+            hosts.sort_unstable();
+            hosts.dedup();
+            launcher::step(format!(
+                "Downloading {} files from {}",
+                artifacts.len(),
+                hosts.join(", ")
+            ))
+        });
         let mut first = None;
         let mut pending = BatchPending {
             metrics: self.metrics.clone(),
@@ -501,10 +543,25 @@ impl Downloader {
         while let Some(result) = work.next().await {
             pending.remaining -= 1;
             if let Err(e) = result {
-                if fail_fast {
-                    return Err(e);
-                }
                 first.get_or_insert(e);
+                if fail_fast {
+                    break;
+                }
+            }
+            if let Some(step) = &step {
+                let finished = artifacts.len() - pending.remaining as usize;
+                let tenths = |files: usize| files * 10 / artifacts.len();
+                if tenths(finished) > tenths(finished - 1) {
+                    step.note(format!("{finished} of {} files", artifacts.len()));
+                }
+            }
+        }
+        if let Some(step) = step {
+            match &first {
+                Some(_) => step.failed("one or more downloads failed"),
+                None => step.done(crate::storage::format_bytes(
+                    artifacts.iter().filter_map(|file| file.size).sum(),
+                )),
             }
         }
         first.map_or(Ok(()), Err)

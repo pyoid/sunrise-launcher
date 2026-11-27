@@ -137,7 +137,7 @@ pub(crate) fn client_program(tag: &str) -> PathBuf {
     #[cfg(target_os = "macos")]
     match crate::game_app::ensure(&dir) {
         Ok(program) => return program,
-        Err(e) => eprintln!("Starting the game outside {}: {e}", crate::game_app::APP),
+        Err(e) => crate::elog!("Starting the game outside {}: {e}", crate::game_app::APP),
     }
     dir.join(CLIENT)
 }
@@ -360,12 +360,10 @@ pub enum PlayStep {
 /// Says on stderr which step Play is at, one line each: a terminal run shows where it stops when
 /// it never gets to the game (#12179).
 pub fn play_step(step: &str) {
-    eprintln!("Sunrise: Play: {step}…");
+    crate::elog!("Sunrise: Play: {step}…");
 }
 
-/// The client's command, once the owner gate lets it start and its resources are prepared. Past
-/// the gate, a sign-in that can't be renewed (no network, expired) still lets the game start,
-/// offline.
+/// The client command, once the owner gate has supplied a session and the files are prepared.
 pub fn client(tag: &str) -> Result<Command, String> {
     client_as(tag, None)
 }
