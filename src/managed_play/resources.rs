@@ -1,7 +1,10 @@
 //! Managed Play reads the exact prepared tree saved with its generation. The ordinary
 //! preparation cache remains available for a later Prepare, without changing an active game.
-use super::{artifact, digest_file, optional_bytes, plain_file, require_dir, unsettled};
-use crate::{backend, preparer, process::leases::ProfileHandoff, profile_txn::durable};
+use super::{artifact, digest_file, optional_bytes, plain_file, pool, require_dir, unsettled};
+use crate::{
+    backend, native_mods::Cancellation, preparer, process::leases::ProfileHandoff,
+    profile_txn::durable,
+};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::{
@@ -138,7 +141,7 @@ impl Resources {
         }
         check()?;
         let root = backend::version_dir(base);
-        Self::seal(&root, &backend::resources(base), |resources| {
+        Self::seal(&root, &backend::resources(base), stop, |resources| {
             check()?;
             let Some(binary) = preparer::binary(&root) else {
                 return Ok(None);
@@ -151,9 +154,7 @@ impl Resources {
                         .flatten())
                 }
                 Ok(_) => Ok(None),
-                Err(error) if stop.is_some_and(crate::native_mods::Cancellation::is_stopped) => {
-                    Err(error)
-                }
+                Err(error) if stop.is_some_and(Cancellation::is_stopped) => Err(error),
                 Err(error) => {
                     eprintln!("{error}");
                     Ok(None)
@@ -190,7 +191,14 @@ impl Resources {
         ] {
             require_dir(dir)?;
         }
-        let actual = artifact::tree(&path, true)?;
+        let actual = logged("Verifying game files", || {
+            Ok(
+                match artifact::tree_with_workers(&path, true, pool::workers(), None)? {
+                    Some((digest, files)) => (Some(digest), files),
+                    None => (None, 0),
+                },
+            )
+        })?;
         if actual != Some(self.primary) {
             return Err(setup_error(&path));
         }
@@ -211,6 +219,18 @@ impl Resources {
     fn seal(
         root: &Path,
         source: &Path,
+        stop: Option<&Cancellation>,
+        accelerator: impl FnOnce(&Path) -> Result<Option<[u8; 32]>, String>,
+    ) -> Result<Self, String> {
+        Self::seal_with(root, source, pool::workers(), stop, accelerator)
+    }
+
+    // Each pass (hash, copy, flush) runs on `workers` threads and joins them before the next.
+    fn seal_with(
+        root: &Path,
+        source: &Path,
+        workers: usize,
+        stop: Option<&Cancellation>,
         accelerator: impl FnOnce(&Path) -> Result<Option<[u8; 32]>, String>,
     ) -> Result<Self, String> {
         let relative = source.strip_prefix(root).map_err(|_| setup_error(source))?;
@@ -225,7 +245,15 @@ impl Resources {
             require_dir(ancestor)?;
         }
         require_dir(root)?;
-        let Some(primary) = artifact::tree(source, true)? else {
+        let primary = logged("Sealing game files: hashing", || {
+            Ok(
+                match artifact::tree_with_workers(source, true, workers, stop)? {
+                    Some((digest, files)) => (Some(digest), files),
+                    None => (None, 0),
+                },
+            )
+        })?;
+        let Some(primary) = primary else {
             return Err(setup_error(source));
         };
         let parent = parent(root);
@@ -247,8 +275,15 @@ impl Resources {
                 .tempdir_in(root.join(".local"))
                 .map_err(|error| at(root, error))?;
             let candidate = stage.path().join("resources");
-            copy_tree(source, &candidate, true, 0)?;
-            durable::flush_tree(&candidate).map_err(|e| at(&candidate, e))?;
+            let copied = logged("Sealing game files: copying", || {
+                let copied = copy_tree_with(source, &candidate, true, 0, workers, stop)?;
+                let files = copied.files.len();
+                Ok((copied, files))
+            })?;
+            logged("Sealing game files: flushing", || {
+                flush_copied(&copied, workers, stop)?;
+                Ok(((), copied.files.len()))
+            })?;
             let (from, to) = if exists {
                 (candidate.as_path(), &resources)
             } else {
@@ -306,38 +341,139 @@ fn key(digest: [u8; 32]) -> String {
     format!("{:x}", sha2::digest::Output::<Sha256>::from(digest))
 }
 
+/// Start and end lines in the launcher log for one pass over a snapshot's files, with how many.
+fn logged<T>(
+    what: &str,
+    run: impl FnOnce() -> Result<(T, usize), pool::Error>,
+) -> Result<T, pool::Error> {
+    let start = std::time::Instant::now();
+    eprintln!("{what}");
+    match run() {
+        Ok((value, files)) => {
+            eprintln!("{what}: {files} files ({} ms)", start.elapsed().as_millis());
+            Ok(value)
+        }
+        Err(error) => {
+            eprintln!("{what}: {error} ({} ms)", start.elapsed().as_millis());
+            Err(error)
+        }
+    }
+}
+
 pub(super) fn copy_tree(
     source: &Path,
     dest: &Path,
     skip_accelerator: bool,
     depth: usize,
 ) -> Result<(), String> {
+    copy_tree_with(source, dest, skip_accelerator, depth, pool::workers(), None)
+        .map(drop)
+        .map_err(String::from)
+}
+
+/// What a copy made: every directory in creation order, then every file.
+struct Copied {
+    dirs: Vec<PathBuf>,
+    files: Vec<(PathBuf, PathBuf)>,
+}
+
+/// Create every directory first, in order, then copy the files on `workers` threads. The
+/// workers are joined before this returns, so a caller may remove `dest` after an error.
+fn copy_tree_with(
+    source: &Path,
+    dest: &Path,
+    skip_accelerator: bool,
+    depth: usize,
+    workers: usize,
+    stop: Option<&Cancellation>,
+) -> Result<Copied, pool::Error> {
+    let mut copied = Copied {
+        dirs: Vec::new(),
+        files: Vec::new(),
+    };
+    lay_out(source, dest, skip_accelerator, depth, stop, &mut copied)?;
+    pool::run(
+        &copied.files,
+        workers,
+        stop,
+        || (),
+        |_, (src, dst)| {
+            let meta = fs::symlink_metadata(src).map_err(|e| file_error(src, e))?;
+            if !plain_file(&meta) || !meta.is_file() {
+                return Err(setup_error(src).into());
+            }
+            preparer::clone_or_copy(src, dst).map_err(|e| file_error(dst, e))
+        },
+    )?;
+    Ok(copied)
+}
+
+fn lay_out(
+    source: &Path,
+    dest: &Path,
+    skip_accelerator: bool,
+    depth: usize,
+    stop: Option<&Cancellation>,
+    copied: &mut Copied,
+) -> Result<(), pool::Error> {
     if depth > 64 {
-        return Err(setup_error(source));
+        return Err(setup_error(source).into());
+    }
+    if let Some(stop) = stop {
+        stop.check()?;
     }
     require_dir(source)?;
-    fs::create_dir(dest).map_err(|e| at(dest, e))?;
-    for entry in fs::read_dir(source).map_err(|e| at(source, e))? {
-        let entry = entry.map_err(|e| at(source, e))?;
+    fs::create_dir(dest).map_err(|e| file_error(dest, e))?;
+    copied.dirs.push(dest.to_owned());
+    for entry in fs::read_dir(source).map_err(|e| file_error(source, e))? {
+        let entry = entry.map_err(|e| file_error(source, e))?;
         let name = entry.file_name();
         if skip_accelerator && generated_cache(&name) {
             continue;
         }
         let src = entry.path();
         let dst = dest.join(name);
-        let meta = fs::symlink_metadata(&src).map_err(|e| at(&src, e))?;
+        let meta = fs::symlink_metadata(&src).map_err(|e| file_error(&src, e))?;
         if !plain_file(&meta) {
-            return Err(setup_error(&src));
+            return Err(setup_error(&src).into());
         }
         if meta.is_dir() {
-            copy_tree(&src, &dst, false, depth + 1)?;
+            lay_out(&src, &dst, false, depth + 1, stop, copied)?;
         } else if meta.is_file() {
-            preparer::clone_or_copy(&src, &dst).map_err(|e| at(&dst, e))?;
+            copied.files.push((src, dst));
         } else {
-            return Err(setup_error(&src));
+            return Err(setup_error(&src).into());
         }
     }
     Ok(())
+}
+
+/// The flush guarantee of `durable::flush_tree`, as its own pass over the copy: every file
+/// first, then every directory, all before the snapshot is renamed into place.
+fn flush_copied(
+    copied: &Copied,
+    workers: usize,
+    stop: Option<&Cancellation>,
+) -> Result<(), pool::Error> {
+    pool::run(
+        &copied.files,
+        workers,
+        stop,
+        || (),
+        |_, (_, dst)| durable::flush_tree(dst).map_err(|e| file_error(dst, e)),
+    )?;
+    pool::run(
+        &copied.dirs,
+        workers,
+        stop,
+        || (),
+        |_, dir| durable::flush_directory(dir).map_err(|e| file_error(dir, e)),
+    )
+    .map(drop)
+}
+
+fn file_error(path: &Path, error: io::Error) -> pool::Error {
+    pool::Error::File(path.to_owned(), error)
 }
 
 fn setup_error(path: &Path) -> String {
@@ -348,108 +484,4 @@ fn at(path: &Path, error: io::Error) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cannot_seal_a_prepared_tree_outside_the_install() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("version");
-        let source = temp.path().join("prepared");
-        fs::create_dir_all(root.join(".local")).unwrap();
-        fs::create_dir(&source).unwrap();
-        fs::write(source.join("sunrise-resources.json"), "{}").unwrap();
-        for source in [source, root.join("../prepared")] {
-            assert!(Resources::seal(&root, &source, |_| Ok(None)).is_err());
-        }
-        assert!(!parent(&root).exists());
-    }
-
-    #[test]
-    fn missing_snapshot_uses_the_same_seal_path_as_first_preparation() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let source = root.join(".local/prepared");
-        fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("sunrise-resources.json"), "{}").unwrap();
-        let prepared = Resources::seal(root, &source, |_| Ok(None)).unwrap();
-        let path = prepared.path_at(root);
-        for missing in [&path, path.parent().unwrap()] {
-            fs::remove_dir_all(missing).unwrap();
-            assert_eq!(Resources::current(root).unwrap(), None);
-            assert_eq!(
-                Resources::seal(root, &source, |_| Ok(None)).unwrap(),
-                prepared
-            );
-            assert_eq!(Resources::current(root).unwrap().as_ref(), Some(&prepared));
-        }
-    }
-
-    #[test]
-    fn a_receipt_cannot_select_stale_or_server_preparation() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let source = root.join(".local/prepared");
-        fs::create_dir_all(&source).unwrap();
-        let lib = root.join("crates/sunrise-prepare/src/lib.rs");
-        fs::create_dir_all(lib.parent().unwrap()).unwrap();
-        fs::write(lib, "pub const OUTPUT_VERSION: u32 = 8;\n").unwrap();
-        let manifest = source.join("sunrise-resources.json");
-        let stamp = source.join("sunrise-prepare.json");
-        fs::write(&manifest, "{}").unwrap();
-        fs::write(&stamp, r#"{"output_version":7}"#).unwrap();
-        Resources::seal(root, &source, |_| Ok(None)).unwrap();
-        assert_eq!(Resources::current(root).unwrap(), None);
-
-        fs::write(&stamp, r#"{"output_version":8}"#).unwrap();
-        fs::write(&manifest, r#"{"profile":"server"}"#).unwrap();
-        Resources::seal(root, &source, |_| Ok(None)).unwrap();
-        assert_eq!(Resources::current(root).unwrap(), None);
-
-        fs::write(&manifest, "{}").unwrap();
-        let full = Resources::seal(root, &source, |_| Ok(None)).unwrap();
-        assert_eq!(Resources::current(root).unwrap(), Some(full));
-    }
-
-    #[test]
-    fn prepared_snapshot_does_not_read_a_cache_from_a_different_tree() {
-        let home = tempfile::tempdir().unwrap();
-        let root = home.path();
-        let source = root.join(".local/prepared");
-        fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("sunrise-resources.json"), "{}").unwrap();
-        fs::write(source.join("blocks.json"), "{\"old\": true}").unwrap();
-        fs::write(source.join(preparer::DATA_FILE), b"untrusted").unwrap();
-        let prepared = Resources::seal(root, &source, |dir| {
-            let data = dir.join(preparer::DATA_FILE);
-            assert!(!data.exists());
-            fs::write(&data, b"generated from the snapshot").unwrap();
-            Ok(digest_file(&data).unwrap())
-        })
-        .unwrap();
-        let snapshot = parent(root).join(key(prepared.primary)).join("resources");
-        assert_eq!(
-            fs::read_to_string(snapshot.join("blocks.json")).unwrap(),
-            "{\"old\": true}"
-        );
-        assert_eq!(
-            Resources::seal(root, &source, |_| panic!("snapshot reused")).unwrap(),
-            prepared
-        );
-        fs::write(source.join("blocks.json"), "{\"new\": true}").unwrap();
-        assert_eq!(Resources::current(root).unwrap().as_ref(), Some(&prepared));
-        fs::write(receipt(root).unwrap(), b"partial").unwrap();
-        assert_eq!(Resources::current(root).unwrap(), None);
-        Resources::invalidate(root).unwrap();
-        assert_eq!(Resources::current(root).unwrap(), None);
-        let changed = Resources::seal(root, &source, |_| Ok(None)).unwrap();
-        assert_ne!(prepared.primary, changed.primary);
-        assert_eq!(Resources::current(root).unwrap(), Some(changed));
-        fs::write(snapshot.join(preparer::DATA_FILE), b"different cache").unwrap();
-        fs::write(snapshot.join("sunrise-data.bin.123.tmp"), b"pending cache").unwrap();
-        let primary = || artifact::tree(&snapshot, true).unwrap();
-        assert_eq!(primary(), Some(prepared.primary));
-        fs::write(snapshot.join("blocks.json"), b"different primary bytes").unwrap();
-        assert_ne!(primary(), Some(prepared.primary));
-    }
-}
+mod tests;
