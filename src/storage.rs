@@ -261,11 +261,17 @@ pub fn allocated_bytes(path: &Path) -> Result<u64, Error> {
 // pass walks each folder once.
 #[cfg(test)]
 thread_local! {
+    static ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 #[cfg(test)]
 pub(crate) fn walks() -> usize {
     WALKS.with(|walks| walks.get())
+}
+
+#[cfg(test)]
+pub(crate) fn entries_calls() -> usize {
+    ENTRIES.with(|calls| calls.get())
 }
 
 /// One validated walk of a folder: every file and directory's allocated size and identity,
