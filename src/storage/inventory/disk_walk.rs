@@ -3,7 +3,7 @@ use super::*;
 
 pub(super) struct Root {
     path: PathBuf,
-    directory: Option<Arc<Dir>>,
+    pub(super) directory: Option<Arc<Dir>>,
 }
 impl Root {
     pub(super) fn open(root: &Path) -> Result<Self, Error> {
@@ -222,7 +222,7 @@ impl Entry {
     }
 }
 
-fn usage_stamp(name: &Path) -> bool {
+pub(super) fn usage_stamp(name: &Path) -> bool {
     let name = name.as_os_str().to_string_lossy();
     name == ".last-used" || (name.starts_with('.') && name.ends_with(".last-used"))
 }
@@ -239,6 +239,8 @@ fn add(
 
 impl Storage {
     pub(super) fn entries(&self) -> Result<Vec<Entry>, Error> {
+        #[cfg(test)]
+        ENTRIES.with(|calls| calls.set(calls.get() + 1));
         let mut entries = Vec::new();
         let build_root = Root::open(&self.root)?;
         for cache in BUILD_CACHES {
