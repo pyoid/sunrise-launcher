@@ -682,34 +682,22 @@ fn renew_due(secrets: &Secrets) -> bool {
     expires_at <= now() + RENEW_BEFORE
 }
 
-/// A new Minecraft token through the refresh token. It hasn't passed the ownership and profile
-/// checks yet; a failure here comes back as the [`Check`] to answer with.
+/// A new Minecraft token through the refresh token, which Microsoft may rotate in `secrets`
+/// even when a later step fails. The token hasn't passed the ownership and profile checks yet.
 fn renew(
     ep: &Endpoints,
     client_id: Option<&str>,
-    mut secrets: Secrets,
+    secrets: &mut Secrets,
     progress: &dyn Fn(session::Phase),
-) -> Result<Secrets, Check> {
+) -> Result<Minecraft, SignInError> {
     progress(session::Phase::Microsoft);
-    let renewed = client_id
+    let ms = client_id
         .ok_or(SignInError::NotConfigured)
-        .and_then(|id| refresh_ms(ep, id, &secrets.refresh_token));
-    let ms = match renewed {
-        Ok(ms) => ms,
-        Err(e) => {
-            secrets.sign_in_required = matches!(e, SignInError::SignInAgain);
-            return Err(Check::NoAnswer(e, secrets));
-        }
-    };
+        .and_then(|id| refresh_ms(ep, id, &secrets.refresh_token))
+        .inspect_err(|e| secrets.sign_in_required = matches!(e, SignInError::SignInAgain))?;
     // Microsoft can rotate its refresh credential even if a later service fails.
     secrets.refresh_token = ms.refresh;
-    match minecraft_login(ep, &ms.access, progress) {
-        Ok(mc) => Ok(Secrets {
-            owns: secrets.owns,
-            ..Secrets::new(secrets.refresh_token, mc)
-        }),
-        Err(e) => Err(Check::NoAnswer(e, secrets)),
-    }
+    minecraft_login(ep, &ms.access, progress)
 }
 
 pub(super) fn check_with(
@@ -728,12 +716,16 @@ pub(super) fn check_with(
     // Minecraft token is kept and played with only once it has passed both checks.
     let mut kept = secrets.clone();
     if force || renew_due(&secrets) {
-        match renew(ep, client_id, secrets, progress) {
-            Ok(renewed) => {
-                kept.refresh_token = renewed.refresh_token.clone();
-                secrets = renewed;
+        let renewed = renew(ep, client_id, &mut secrets, progress);
+        kept.refresh_token.clone_from(&secrets.refresh_token);
+        match renewed {
+            Ok(mc) => {
+                secrets = Secrets {
+                    owns: secrets.owns,
+                    ..Secrets::new(secrets.refresh_token, mc)
+                }
             }
-            Err(check) => return check,
+            Err(e) => return Check::NoAnswer(e, secrets),
         }
     }
     let token = &secrets.minecraft_token;
