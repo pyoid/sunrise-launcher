@@ -554,3 +554,56 @@ fn status_shows_a_token_past_its_exp_claim_as_needing_refresh() {
     let _accounts = signed_in(&store, &secrets(&live, true));
     assert_eq!(session::status(&store, UUID).state, session::State::Ready);
 }
+
+#[test]
+fn a_refusal_from_the_services_never_plays_on_a_fresh_kept_token() {
+    // The profile answers 401: a refusal, not an outage. The kept token is fresh (no renewal),
+    // and still the game doesn't start on it.
+    let (_, ep) = mock(|m| m.profile_answers = [401].into());
+    let store = MemoryStore::default();
+    let mut accounts = signed_in(&store, &secrets("mc-token", true));
+    assert!(launch_for_game(&ep, Some("test-client"), &store, &mut accounts).is_err());
+    // The same request answered 503: the services are down, and the fresh kept token plays.
+    let (_, ep) = mock(|m| m.profile_answers = [503].into());
+    let mut accounts = signed_in(&store, &secrets("mc-token", true));
+    let pass = launch_for_game(&ep, Some("test-client"), &store, &mut accounts).unwrap();
+    assert_eq!(pass.session.unwrap().1.minecraft_token, "mc-token");
+}
+
+#[test]
+fn an_outage_after_renewal_keeps_the_rotated_refresh_token_and_drops_the_unchecked_one() {
+    // Less than an hour left: the token is renewed (Microsoft rotates its refresh token), then
+    // the profile check meets an outage. The new Minecraft token never passed the ownership and
+    // profile checks, so it is rolled back; the old one, still good, plays.
+    let (_, ep) = mock(|m| m.profile_answers = [503].into());
+    let store = MemoryStore::default();
+    let near = Secrets {
+        minecraft_expires_at: now() + 1800,
+        ..secrets("old-token", true)
+    };
+    let mut accounts = signed_in(&store, &near);
+    let pass = launch_for_game(&ep, Some("test-client"), &store, &mut accounts).unwrap();
+    assert_eq!(pass.session.unwrap().1.minecraft_token, "old-token");
+    let kept = kept(&store);
+    assert_eq!(
+        kept.minecraft_token, "old-token",
+        "the unchecked token isn't kept"
+    );
+    assert_eq!(
+        kept.refresh_token, "ms-refresh-2",
+        "Microsoft's rotation is kept"
+    );
+}
+
+#[test]
+fn play_renews_a_token_past_its_exp_claim_when_the_services_answer() {
+    // #618: the kept expiry says two hours, the token's own `exp` has passed. Play renews it
+    // instead of sending the dead token and refusing on every retry.
+    let (_, ep) = mock(|_| {});
+    let store = MemoryStore::default();
+    let dead = jwt(&format!(r#"{{"exp":{}}}"#, now() - 10));
+    let mut accounts = signed_in(&store, &secrets(&dead, true));
+    let pass = launch_for_game(&ep, Some("test-client"), &store, &mut accounts).unwrap();
+    assert_eq!(pass.session.unwrap().1.minecraft_token, "mc-token");
+    assert_eq!(kept(&store).minecraft_token, "mc-token");
+}

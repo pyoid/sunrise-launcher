@@ -138,7 +138,9 @@ pub fn launch(
             Check::NoAnswer(e, secrets) => {
                 // No answer, but the token the keychain keeps is still good: the game plays
                 // signed in with it rather than without a session (#542).
-                if plays && still_valid(&secrets) {
+                // Only when the services couldn't answer: a refusal (401/403, a bad profile) or a
+                // locked keychain never starts the game on the kept token.
+                if plays && matches!(e, SignInError::Unavailable(_)) && still_valid(&secrets) {
                     pass.session = Some((account.clone(), secrets.clone()));
                     (None, secrets)
                 } else {

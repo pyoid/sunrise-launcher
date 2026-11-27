@@ -241,14 +241,21 @@ impl Client<'_> {
                     if offline {
                         return Ok(());
                     }
+                    // Account refusals stay `StartError::Account`: the window opens sign-in for
+                    // them, and never reports them as a failed build.
                     let uuid = self
                         .accepted_account
-                        .ok_or_else(|| NoOwner::default().in_window())?;
+                        .ok_or_else(|| StartError::Account(NoOwner::default()))?;
                     account::check_launch_account(&Accounts::load(), uuid)
-                        .map_err(|refused| refused.in_window())?;
+                        .map_err(StartError::Account)?;
                     progress(Progress::SignIn);
                     let session = account::session_for_game_accepted(&backend::game_home(), uuid)
-                        .map_err(|refused| refused.in_window())?;
+                        .map_err(StartError::Account)?;
+                    // Signed out while the services were asked: that session never plays.
+                    if let Err(refused) = account::check_launch_account(&Accounts::load(), uuid) {
+                        account::discard_launch_session(session.file);
+                        return Err(StartError::Account(refused));
+                    }
                     account::retain_launch_session(session.file.as_deref());
                     *session_file.borrow_mut() = session.file.clone();
                     *notice.borrow_mut() = session

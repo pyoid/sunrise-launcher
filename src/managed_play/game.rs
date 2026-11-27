@@ -62,7 +62,7 @@ impl Profile {
         mut command: Command,
         (launch, piped, hook_log): (&crate::launch::Launch, bool, &dyn Fn(String)),
         prepare_jars: impl FnOnce(&Command) -> Result<(), String>,
-        check_account: impl FnOnce(&mut Command) -> Result<(), String>,
+        check_account: impl FnOnce(&mut Command) -> Result<(), StartError>,
     ) -> Result<(Child, RuntimeGuard), StartError> {
         let wrapper = crate::launch::managed_wrapper(&mut command, launch);
         let selection = validate_selection(self.home(), &active.resource_path(), &command)?;
@@ -86,7 +86,7 @@ impl Profile {
         selected: (Command, LaunchArguments),
         wrapper: &[std::ffi::OsString],
         piped: bool,
-        check_account: impl FnOnce(&mut Command) -> Result<(), String>,
+        check_account: impl FnOnce(&mut Command) -> Result<(), StartError>,
     ) -> Result<(Child, RuntimeGuard), StartError> {
         self.verified_handoff(active, cancellation, |profile| {
             let (command, selection) = selected;
@@ -147,6 +147,9 @@ impl Profile {
                 command.process_group(0);
             }
             check_account(&mut command)?;
+            // Signing in can take a network round trip after the handoff's own checks: a Stop
+            // pressed meanwhile still starts no game.
+            cancellation.check()?;
             let child = if wrapper.is_empty() {
                 let program = command.get_program().to_string_lossy().into_owned();
                 leases
@@ -323,7 +326,7 @@ mod tests {
                 |command: &mut Command| {
                     events.borrow_mut().push("account check");
                     command.arg("--session-file").arg("written-here");
-                    Err("refused at the account check".to_string())
+                    Err(StartError::Other("refused at the account check".into()))
                 },
             )
         };
@@ -348,5 +351,28 @@ mod tests {
             refused.contains("refused at the account check"),
             "{refused}"
         );
+
+        // Stop pressed while the account check signs in: the check answers, but no game starts.
+        let stopped = {
+            let command = command();
+            let selection =
+                validate_selection(profile.home(), &active.resource_path(), &command).unwrap();
+            profile.spawn_selected(
+                &active,
+                &cancellation,
+                (command, selection),
+                &[],
+                false,
+                |_: &mut Command| {
+                    cancellation.stop();
+                    Ok(())
+                },
+            )
+        };
+        let stopped = format!(
+            "{:?}",
+            stopped.err().expect("a stopped Play starts no game")
+        );
+        assert!(stopped.contains("cancelled"), "{stopped}");
     }
 }
