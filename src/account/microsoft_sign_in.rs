@@ -39,7 +39,7 @@ impl Endpoints {
         // screenshot the Skins tab against a local mock.
         let minecraft = std::env::var("SUNRISE_MINECRAFT_SERVICES_ENDPOINT")
             .ok()
-            .filter(|_| cfg!(debug_assertions));
+            .filter(|_| cfg!(any(test, debug_assertions)));
         Self::at(microsoft.as_deref(), minecraft.as_deref())
     }
 

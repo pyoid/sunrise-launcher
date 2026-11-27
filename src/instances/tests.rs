@@ -1436,13 +1436,39 @@ fn first_profile_is_stable_without_migrating_old_players() {
     assert!(!existing.join(FILE).exists());
 }
 
+// Port zero is not a listening endpoint; the ownership check gets a transport error.
+#[cfg(unix)]
+const UNAVAILABLE_MINECRAFT_SERVICES: &str = "http://127.0.0.1:0";
+
+#[cfg(unix)]
+fn cache_owned_play_account(data: &Path) {
+    const UUID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let accounts =
+        serde_json::json!({"selected": UUID, "accounts": [{"uuid": UUID, "name": "Player"}]});
+    fs::write(data.join("accounts.json"), accounts.to_string()).unwrap();
+    // Leave two hours so Play checks ownership without trying Microsoft renewal.
+    let expires_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 7200;
+    let secrets = serde_json::json!({
+        "refresh_token": "fixture",
+        "minecraft_token": "fixture",
+        "minecraft_expires_at": expires_at,
+        "owns": true,
+    });
+    crate::account::store()
+        .set(UUID, &secrets.to_string())
+        .unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn an_installed_legacy_pin_still_starts_its_client() {
     use std::os::unix::fs::PermissionsExt;
     const ACTOR: &str = "SUNRISE_STABLE_LEGACY_PLAY_TEST";
     const OLD: &str = "v2026.10.13";
-    const UUID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     if std::env::var_os(ACTOR).is_none() {
         let root = tempfile::tempdir().unwrap();
         assert!(Command::new(std::env::current_exe().unwrap())
@@ -1455,6 +1481,11 @@ fn an_installed_legacy_pin_still_starts_its_client() {
             .env("SUNRISE_HOME", root.path().join("game"))
             .env("SUNRISE_TELEMETRY_URL", "off")
             .env("SUNRISE_NO_KEYCHAIN", "1")
+            .env("SUNRISE_MSA_CLIENT_ID", "")
+            .env(
+                "SUNRISE_MINECRAFT_SERVICES_ENDPOINT",
+                UNAVAILABLE_MINECRAFT_SERVICES,
+            )
             .status()
             .unwrap()
             .success());
@@ -1475,21 +1506,14 @@ fn an_installed_legacy_pin_still_starts_its_client() {
     fs::write(&client, "#!/bin/sh\nprintf 'legacy client reached\\n'\n").unwrap();
     fs::set_permissions(&client, fs::Permissions::from_mode(0o700)).unwrap();
 
-    // Local stand-in for an already authenticated session; no service is contacted.
-    let accounts =
-        serde_json::json!({"selected": UUID, "accounts": [{"uuid": UUID, "name": "Player"}]});
-    fs::write(data.join("accounts.json"), accounts.to_string()).unwrap();
-    let secrets = serde_json::json!({"refresh_token":"fixture", "minecraft_token":"fixture",
-        "minecraft_expires_at":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 3600});
-    crate::account::store()
-        .set(UUID, &secrets.to_string())
-        .unwrap();
+    cache_owned_play_account(&data);
 
     assert!(!backend::is_game_tag(OLD));
     let instance = selection().unwrap();
     let tag = instance.resolve_version(None).unwrap();
     assert_eq!(tag, OLD);
     let mut cmd = backend::client_as(&tag, None).unwrap();
+    assert!(cmd.get_args().any(|arg| arg == "--session-file"));
     apply(&mut cmd, &instance).unwrap();
     let result = cmd.output().unwrap();
     assert!(result.status.success(), "{result:?}");
@@ -1516,6 +1540,11 @@ fn same_day_rolling_nightly_remains_the_play_target_offline() {
             .env("SUNRISE_HOME", root.path().join("game"))
             .env("SUNRISE_TELEMETRY_URL", "off")
             .env("SUNRISE_NO_KEYCHAIN", "1")
+            .env("SUNRISE_MSA_CLIENT_ID", "")
+            .env(
+                "SUNRISE_MINECRAFT_SERVICES_ENDPOINT",
+                UNAVAILABLE_MINECRAFT_SERVICES,
+            )
             .status()
             .unwrap()
             .success());
@@ -1562,16 +1591,9 @@ fn same_day_rolling_nightly_remains_the_play_target_offline() {
         fs::write(&client, format!("#!/bin/sh\nprintf '%s' '{name}'\n")).unwrap();
         fs::set_permissions(client, fs::Permissions::from_mode(0o700)).unwrap();
     }
-    const UUID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let accounts =
-        serde_json::json!({"selected": UUID, "accounts": [{"uuid": UUID, "name": "Player"}]});
-    fs::write(data.join("accounts.json"), accounts.to_string()).unwrap();
-    let secrets = serde_json::json!({"refresh_token":"fixture", "minecraft_token":"fixture",
-        "minecraft_expires_at":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 3600});
-    crate::account::store()
-        .set(UUID, &secrets.to_string())
-        .unwrap();
+    cache_owned_play_account(&data);
     let mut cmd = backend::client_as(&tag, None).unwrap();
+    assert!(cmd.get_args().any(|arg| arg == "--session-file"));
     apply(&mut cmd, &profile).unwrap();
     let result = cmd.output().unwrap();
     assert!(result.status.success(), "{result:?}");
