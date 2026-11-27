@@ -395,16 +395,18 @@ fn background_cleanup_skips_a_held_build_then_evicts_when_idle() {
     assert!(payload.exists());
     drop(held);
 
-    let bytes = allocated_bytes(&home.0.join("rust/old")).unwrap();
+    let before_bytes = allocated_bytes(&home.0.join("rust/old")).unwrap();
     lines.clear();
     eviction::run_background_cleanup(|| Storage::at(&home.0), |line| lines.push(line.to_owned()));
     assert!(!payload.exists());
+    let after_bytes = allocated_bytes(&home.0.join("rust/old")).unwrap();
+    let freed = before_bytes.saturating_sub(after_bytes);
+    assert!(freed > 0);
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[0], "storage cleanup: start");
     let elapsed = lines[1]
         .strip_prefix("storage cleanup: end (")
-        .unwrap()
-        .strip_suffix(&format!(" ms, {bytes} bytes freed)"))
-        .unwrap();
-    assert!(elapsed.parse::<u128>().is_ok());
+        .and_then(|rest| rest.strip_suffix(&format!(" ms, {freed} bytes freed)")))
+        .unwrap_or_else(|| panic!("expected {freed} freed bytes in {:?}", lines[1]));
+    assert!(elapsed.parse::<u128>().is_ok(), "{}", lines[1]);
 }

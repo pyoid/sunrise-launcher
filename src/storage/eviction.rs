@@ -28,7 +28,7 @@ impl Storage {
     }
 
     pub fn evict(&self) -> Result<Report, Error> {
-        let settings = backend::Settings::load();
+        let settings = backend::Settings::load_cached_from(&self.data);
         let limit = settings
             .cache_limit_gib
             .unwrap_or(policy::DEFAULT_LIMIT_GIB);
