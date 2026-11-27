@@ -2,7 +2,8 @@
 use super::{
     check_play_resources, check_prepared, complete_assets_staged, complete_reports,
     finish_preparation, finish_preparation_cancellable, forget_prepared, refill_own_store,
-    resources, resources_at, resources_compatible, LEGACY_OUTPUT_VERSIONS, RESOURCES_MANIFEST,
+    resources, resources_at, resources_compatible, resources_owner, resources_owner_in,
+    LEGACY_OUTPUT_VERSIONS, RESOURCES_MANIFEST,
 };
 use crate::backend::{
     game_version_at, installed_in, prepare_lock, prepare_lock_at, version_dir, versions_dir,
@@ -55,13 +56,19 @@ pub(crate) fn copy_dir_except(from: &Path, to: &Path, skip: Option<&Path>) -> st
 /// change both). The player then needs neither their Minecraft folder nor a new preparation to
 /// play a release that only changed Sunrise. The caller holds the target's preparation lock.
 pub(crate) fn reuse_prepared(versions: &Path, tag: &str) -> Option<String> {
+    if resources_owner_in(versions, tag) != tag {
+        return None;
+    }
     let target = versions.join(tag);
     let to = resources_at(&target);
     if to.join(RESOURCES_MANIFEST).exists() {
         return None;
     }
     let version = game_version_at(&target);
-    for other in installed_in(versions).into_iter().filter(|t| t != tag) {
+    for other in installed_in(versions)
+        .into_iter()
+        .filter(|t| t != tag && resources_owner_in(versions, t) == *t)
+    {
         let source = versions.join(&other);
         if game_version_at(&source) != version {
             continue;
@@ -175,7 +182,10 @@ pub fn reuse_prepared_everywhere() -> Vec<(String, String)> {
     let versions = versions_dir();
     let reused = reuse_prepared_in(&versions);
     forget_prepared();
-    for tag in installed_in(&versions) {
+    for tag in installed_in(&versions)
+        .into_iter()
+        .filter(|tag| resources_owner(tag) == *tag)
+    {
         // Here, on the start-up thread, and not in `complete_assets`, which Play also runs: a
         // download of thousands of files is not for the moment the game is waited for.
         let Ok(preparation) = prepare_lock(&tag) else {
@@ -198,6 +208,7 @@ pub(in crate::backend) fn reuse_prepared_in(versions: &Path) -> Vec<(String, Str
     let mut tags = installed_in(versions);
     tags.reverse();
     tags.into_iter()
+        .filter(|tag| resources_owner_in(versions, tag) == *tag)
         .filter_map(|tag| {
             let _preparation = prepare_lock_at(&versions.join(&tag), &tag).ok()?;
             let from = reuse_prepared(versions, &tag);
