@@ -4183,16 +4183,19 @@ mod tests {
                 l.skins.profile = Some(Ok(profile(SKIN, false, Some("c1"))));
 
                 // Fill the write queue so an older confirmed cape record stays pending.
+                let (started, running) = std::sync::mpsc::channel::<()>();
                 let (release, held) = std::sync::mpsc::channel::<()>();
                 l.skins
                     .writes
                     .push(
                         "test",
                         Box::new(move || {
+                            let _ = started.send(());
                             let _ = held.recv();
                         }),
                     )
                     .unwrap();
+                running.recv().unwrap();
                 while l.skins.writes.push("test", Box::new(|| {})).is_ok() {}
                 l.skins.confirmed.cape =
                     Some(Some("http://textures.minecraft.net/texture/c1".into()));
