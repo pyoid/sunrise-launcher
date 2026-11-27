@@ -100,6 +100,7 @@ pub(super) fn client(args: PlayArgs) -> Result<i32, Error> {
             &native_mods::Cancellation::default(),
             |progress| match progress {
                 managed_play::Progress::Prepare => backend::play_step("preparing the game's files"),
+                managed_play::Progress::Verify => backend::play_step("checking game files"),
                 managed_play::Progress::SignIn => backend::play_step("reading the sign-in"),
                 managed_play::Progress::Line(line) => eprintln!("{line}"),
                 _ => {}

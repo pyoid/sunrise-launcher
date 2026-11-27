@@ -505,6 +505,7 @@ impl Launcher {
                         },
                         Progress::Native(step) => Msg::NativeProgress(step),
                         Progress::NativeLog(output) => Msg::ManagedBuildLog(output),
+                        Progress::Verify => Msg::PlayStep(backend::PlayStep::Assets),
                         Progress::SignIn => Msg::PlayStep(backend::PlayStep::SignIn),
                         Progress::Line(line) | Progress::HookLine(line) => {
                             Msg::Line(Job::Prepare, line)

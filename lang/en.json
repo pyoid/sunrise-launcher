@@ -2645,5 +2645,6 @@
   "Profile game build: not played yet; it stays on {build}": "Profile game build: not played yet; it stays on {build}",
   "Profile game build: not played yet; it follows the newest {channel} build": "Profile game build: not played yet; it follows the newest {channel} build",
   "Every installed build named for these mods ({version}) holds other mods or was changed after it was installed. Remove them, then build again.": "Every installed build named for these mods ({version}) holds other mods or was changed after it was installed. Remove them, then build again.",
-  "Put {mod} in {folder} as the .smod `cargo sunrise-mod build` packs from its source.": "Put {mod} in {folder} as the .smod `cargo sunrise-mod build` packs from its source."
+  "Put {mod} in {folder} as the .smod `cargo sunrise-mod build` packs from its source.": "Put {mod} in {folder} as the .smod `cargo sunrise-mod build` packs from its source.",
+  "Game arguments cannot override the account selected for Play.": "Game arguments cannot override the account selected for Play."
 }
