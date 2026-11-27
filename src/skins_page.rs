@@ -3593,7 +3593,7 @@ mod tests {
             return;
         }
         let mut app = gpui::TestAppContext::single();
-        let (shell, cx) = app.add_window_view(crate::window_root::Shell::new);
+        let (shell, cx) = app.add_window_view(crate::window_root::Shell::new_for_test);
         let launcher = shell.read_with(cx, |shell, _| shell.launcher());
         launcher.update(cx, |l, cx| {
             l.accounts.accounts.push(account::Account {
@@ -4287,6 +4287,19 @@ mod tests {
                 job();
                 assert!(matches!(rx.recv().unwrap(), Msg::Picture(url, None) if url == SKIN));
                 assert_eq!(FETCHED.load(Ordering::Relaxed), 0);
+            },
+        );
+    }
+
+    #[test]
+    fn a_test_window_does_not_start_startup_update_checks() {
+        in_a_scratch_launcher(
+            "skins_page::tests::a_test_window_does_not_start_startup_update_checks",
+            |l, _| {
+                assert!(
+                    !l.checking_updates && l.checked.is_none(),
+                    "Shell::new_for_test must not start startup GitHub update checks"
+                );
             },
         );
     }
