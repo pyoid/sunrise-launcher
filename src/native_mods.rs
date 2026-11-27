@@ -241,16 +241,13 @@ pub fn is_native(version: &str) -> bool {
     version.starts_with(PREFIX)
 }
 
-/// Records the whole attempt, including selection or export after compilation. Then stamps
-/// shared caches under the lease; eviction belongs to desktop cleanup or `storage --clear`.
+/// Records the whole attempt, including selection or export after compilation.
 fn logged<T, E: std::fmt::Display + From<String>>(
     cancellation: &Cancellation,
     waiting: &dyn Fn(),
     build: impl FnOnce(Result<&crate::native_cache::Cache, &str>) -> Result<T, E>,
 ) -> Result<T, E> {
-    logged_then(cancellation, waiting, build, |cache| {
-        crate::storage::eviction::after_build_logged(cache, log_warning)
-    })
+    logged_then(cancellation, waiting, build, |_| {})
 }
 
 /// The build lease on the build folder. While another build or a cache cleanup holds it, this
