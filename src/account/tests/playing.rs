@@ -607,3 +607,46 @@ fn play_renews_a_token_past_its_exp_claim_when_the_services_answer() {
     assert_eq!(pass.session.unwrap().1.minecraft_token, "mc-token");
     assert_eq!(kept(&store).minecraft_token, "mc-token");
 }
+
+#[test]
+fn a_mismatched_profile_after_renewal_stores_the_old_token_marked_for_sign_in() {
+    // The token is renewed, then the services name another profile than the one signed in.
+    // What is stored is the previous Minecraft token with Microsoft's rotated refresh token and
+    // the refusal; the replacement, issued for another profile, is never kept under this one.
+    let (_, ep) = mock(|_| {});
+    let store = MemoryStore::default();
+    let mut accounts = Accounts::default();
+    let other = Account {
+        uuid: "0f22b7ed5e3d4a2c9bfe2f6f8f1f6a01".into(),
+        name: "Alex".into(),
+        skin: None,
+        cape: None,
+    };
+    let near = Secrets {
+        minecraft_expires_at: now() + 1800,
+        ..secrets("old-token", true)
+    };
+    accounts.add(&store, other.clone(), &near).unwrap();
+    assert!(launch_for_game(&ep, Some("test-client"), &store, &mut accounts).is_err());
+    let stored = secrets_in(&store, &other.uuid).unwrap();
+    assert_eq!(stored.minecraft_token, "old-token");
+    assert_eq!(stored.minecraft_expires_at, near.minecraft_expires_at);
+    assert_eq!(stored.refresh_token, "ms-refresh-2");
+    assert!(stored.sign_in_required);
+}
+
+#[test]
+fn a_no_after_renewal_stores_the_old_token_and_the_answer() {
+    let (_, ep) = mock(|m| m.owns_game = false);
+    let store = MemoryStore::default();
+    let near = Secrets {
+        minecraft_expires_at: now() + 1800,
+        ..secrets("old-token", true)
+    };
+    let mut accounts = signed_in(&store, &near);
+    assert!(launch_for_game(&ep, Some("test-client"), &store, &mut accounts).is_err());
+    let stored = kept(&store);
+    assert_eq!(stored.minecraft_token, "old-token");
+    assert_eq!(stored.refresh_token, "ms-refresh-2");
+    assert!(!stored.owns);
+}

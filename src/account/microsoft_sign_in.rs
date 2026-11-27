@@ -671,6 +671,47 @@ pub(super) fn check(
     check_with(ep, client_id, account, secrets, false, &|_| {})
 }
 
+/// Whether the Minecraft token is due for renewal: the earlier of the kept expiry and the
+/// token's own `exp` (#618) is within [`RENEW_BEFORE`], so a token whose claim has passed is
+/// renewed while the services answer rather than sent and refused.
+fn renew_due(secrets: &Secrets) -> bool {
+    let expires_at = super::game_launch::token_exp(&secrets.minecraft_token)
+        .map_or(secrets.minecraft_expires_at, |exp| {
+            exp.min(secrets.minecraft_expires_at)
+        });
+    expires_at <= now() + RENEW_BEFORE
+}
+
+/// A new Minecraft token through the refresh token. It hasn't passed the ownership and profile
+/// checks yet; a failure here comes back as the [`Check`] to answer with.
+fn renew(
+    ep: &Endpoints,
+    client_id: Option<&str>,
+    mut secrets: Secrets,
+    progress: &dyn Fn(session::Phase),
+) -> Result<Secrets, Check> {
+    progress(session::Phase::Microsoft);
+    let renewed = client_id
+        .ok_or(SignInError::NotConfigured)
+        .and_then(|id| refresh_ms(ep, id, &secrets.refresh_token));
+    let ms = match renewed {
+        Ok(ms) => ms,
+        Err(e) => {
+            secrets.sign_in_required = matches!(e, SignInError::SignInAgain);
+            return Err(Check::NoAnswer(e, secrets));
+        }
+    };
+    // Microsoft can rotate its refresh credential even if a later service fails.
+    secrets.refresh_token = ms.refresh;
+    match minecraft_login(ep, &ms.access, progress) {
+        Ok(mc) => Ok(Secrets {
+            owns: secrets.owns,
+            ..Secrets::new(secrets.refresh_token, mc)
+        }),
+        Err(e) => Err(Check::NoAnswer(e, secrets)),
+    }
+}
+
 pub(super) fn check_with(
     ep: &Endpoints,
     client_id: Option<&str>,
@@ -682,39 +723,17 @@ pub(super) fn check_with(
     if secrets.sign_in_required {
         return Check::NoAnswer(SignInError::SignInAgain, secrets);
     }
-    // The earlier of the kept expiry and the token's own `exp` (#618): a token whose claim has
-    // passed is renewed while the services answer, rather than sent and refused.
-    let expires_at = super::game_launch::token_exp(&secrets.minecraft_token)
-        .map_or(secrets.minecraft_expires_at, |exp| {
-            exp.min(secrets.minecraft_expires_at)
-        });
-    // The token before any renewal: a replacement that didn't pass the ownership and profile
-    // checks is never kept or played with (only Microsoft's rotated refresh token is).
-    let before = secrets.clone();
-    let mut renewed_now = false;
-    if force || expires_at <= now() + RENEW_BEFORE {
-        progress(session::Phase::Microsoft);
-        let renewed = client_id
-            .ok_or(SignInError::NotConfigured)
-            .and_then(|id| refresh_ms(ep, id, &secrets.refresh_token));
-        let ms = match renewed {
-            Ok(ms) => ms,
-            Err(e) => {
-                secrets.sign_in_required = matches!(e, SignInError::SignInAgain);
-                return Check::NoAnswer(e, secrets);
+    // The credentials kept before this check. Any answer short of "owns it, same profile" goes
+    // back to them (with Microsoft's rotated refresh token and the refusal), so a renewed
+    // Minecraft token is kept and played with only once it has passed both checks.
+    let mut kept = secrets.clone();
+    if force || renew_due(&secrets) {
+        match renew(ep, client_id, secrets, progress) {
+            Ok(renewed) => {
+                kept.refresh_token = renewed.refresh_token.clone();
+                secrets = renewed;
             }
-        };
-        // Microsoft can rotate its refresh credential even if a later service fails.
-        secrets.refresh_token = ms.refresh;
-        match minecraft_login(ep, &ms.access, progress) {
-            Ok(mc) => {
-                renewed_now = true;
-                secrets = Secrets {
-                    owns: secrets.owns,
-                    ..Secrets::new(secrets.refresh_token, mc)
-                }
-            }
-            Err(e) => return Check::NoAnswer(e, secrets),
+            Err(check) => return check,
         }
     }
     let token = &secrets.minecraft_token;
@@ -726,23 +745,16 @@ pub(super) fn check_with(
         progress(session::Phase::Profile);
         profile(ep, token)
     }) {
-        Err(e) if renewed_now => Check::NoAnswer(
-            e,
-            Secrets {
-                refresh_token: secrets.refresh_token,
-                ..before
-            },
-        ),
-        Err(e) => Check::NoAnswer(e, secrets),
+        Err(e) => Check::NoAnswer(e, kept),
         Ok(None) => Check::DoesNot(Secrets {
             owns: false,
-            ..secrets
+            ..kept
         }),
         Ok(Some(p)) if p.uuid != account.uuid => Check::NoAnswer(
             SignInError::OtherProfile,
             Secrets {
                 sign_in_required: true,
-                ..secrets
+                ..kept
             },
         ),
         Ok(Some(p)) => Check::Owns(
